@@ -1,0 +1,8 @@
+.env
+__pycache__/
+.pytest_cache/
+*.pyc
+nanit_tokens.json
+sync_status.json
+sync.lock
+data/

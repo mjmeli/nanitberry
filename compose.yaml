@@ -1,0 +1,10 @@
+services:
+  nanitberry:
+    image: ${NANITBERRY_IMAGE:-ghcr.io/mjmeli/nanitberry:latest}
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
