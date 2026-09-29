@@ -61,7 +61,7 @@ def private_json(path, data, **kwargs):
 
 def failure_reason(exc):
     if isinstance(exc, (NanitReauthRequired, NanitAuthError)):
-        return "nanit_reauth_required", "Run: docker compose run --rm -it sync python sync.py login"
+        return "nanit_reauth_required", "Run: docker compose run --rm -it nanitberry python sync.py login"
     if isinstance(exc, NanitConnectionError):
         return "nanit_api_error", "Nanit request or token refresh failed; retry later"
     if str(exc).startswith("Nanit calendar"):

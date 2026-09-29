@@ -123,6 +123,72 @@ class IntervalTests(unittest.TestCase):
         with self.assertRaises(ConnectionError):
             asyncio.run(sync.strict_sleep_intervals(API(), "child", start, start + timedelta(hours=1)))
 
+    def test_history_includes_regular_and_batched_entries_crossing_window_start(self):
+        firestore = types.ModuleType("google.cloud.firestore")
+        firestore.FieldFilter = lambda *args: args
+        cloud = types.ModuleType("google.cloud")
+        cloud.firestore = firestore
+        google = types.ModuleType("google")
+        google.cloud = cloud
+
+        class Interval:
+            @classmethod
+            def model_validate(cls, data):
+                return types.SimpleNamespace(**data)
+
+        class Multi:
+            @classmethod
+            def model_validate(cls, data):
+                return types.SimpleNamespace(data={
+                    key: Interval.model_validate(value) for key, value in data["data"].items()})
+
+        models = types.ModuleType("huckleberry_api.firebase_types")
+        models.FirebaseSleepIntervalData = Interval
+        models.FirebaseSleepMultiContainer = Multi
+        regular_rows = [
+            {"start": 800, "duration": 100},  # ended before the window
+            {"start": 900, "duration": 200},  # begins before, overlaps
+            {"start": 1900, "duration": 200},
+            {"start": 2100, "duration": 100},  # filtered by Firestore
+        ]
+        multi_rows = [{"multi": True, "data": {
+            "old": {"start": 700, "duration": 100},
+            "crossing": {"start": 950, "duration": 100},
+            "late": {"start": 2000, "duration": 100},
+        }}]
+        filters = []
+
+        class Collection:
+            def collection(self, *_): return self
+            def document(self, *_): return self
+            def where(self, *, filter):
+                filters.append(filter)
+                rows = ([row for row in regular_rows if row["start"] < filter[2]]
+                        if filter[0] == "start" else multi_rows)
+
+                class Query:
+                    def stream(self):
+                        async def documents():
+                            for row in rows:
+                                yield types.SimpleNamespace(to_dict=lambda row=row: row)
+                        return documents()
+                return Query()
+
+        class API:
+            async def _get_firestore_client(self): return Collection()
+
+        start = datetime.fromtimestamp(1000, ZoneInfo("UTC"))
+        end = datetime.fromtimestamp(2000, ZoneInfo("UTC"))
+        with patch.dict(sys.modules, {"google": google, "google.cloud": cloud,
+                                      "google.cloud.firestore": firestore,
+                                      "huckleberry_api.firebase_types": models}):
+            found = asyncio.run(sync.strict_sleep_intervals(API(), "child", start, end))
+        self.assertEqual(sorted(entry.start for entry in found), [900, 950, 1900])
+        self.assertEqual(filters, [("start", "<", 2000.0), ("multi", "==", True)])
+        self.assertTrue(any(sync.overlap(sync.existing_range(entry),
+                                         (start, datetime.fromtimestamp(1050, ZoneInfo("UTC"))))
+                            for entry in found))
+
     def test_health_reports_reauth_and_stale_runs(self):
         original_state, original_status = sync.STATE, sync.STATUS
         try:
@@ -237,6 +303,96 @@ class IntervalTests(unittest.TestCase):
             asyncio.run(sync._sync_day(date(2020, 9, 27)))
         self.assertEqual(changed_history.calls, 2)
         self.assertEqual(API.writes, [])
+
+    def test_full_sync_fails_closed_on_history_error_or_bad_calendar_data(self):
+        evening = datetime(2020, 9, 27, 20, tzinfo=ZoneInfo("America/New_York"))
+        valid = {"type": "auto_sleep", "begin_ts": evening.timestamp(),
+                 "end_ts": (evening + timedelta(hours=2)).timestamp()}
+        malformed = {"type": "auto_sleep", "begin_ts": evening.timestamp()}
+
+        class Session:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        class API:
+            writes = []
+            def __init__(self, **kwargs): pass
+            async def authenticate(self): pass
+            async def log_sleep(self, *args, **kwargs): self.writes.append((args, kwargs))
+
+        env = {"TZ": "America/New_York", "NANIT_BABY_UID": "baby",
+               "HUCKLEBERRY_CHILD_UID": "child", "HUCKLEBERRY_EMAIL": "test@example.invalid",
+               "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "true",
+               "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
+        original_state, original_status = sync.STATE, sync.STATUS
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                sync.STATE = Path(tmp) / "nanit_tokens.json"
+                sync.STATUS = Path(tmp) / "sync_status.json"
+                sync.save_tokens({"access_token": "a", "refresh_token": "r"})
+                for scenario in ("history_unavailable", "malformed_calendar"):
+                    with self.subTest(scenario=scenario):
+                        async def calendar(*_):
+                            return [malformed if scenario == "malformed_calendar" else valid]
+
+                        async def history(*_):
+                            if scenario == "history_unavailable":
+                                raise ConnectionError("Firestore unavailable")
+                            return []
+
+                        with patch.dict(os.environ, env), \
+                             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
+                             patch.object(sync, "HuckleberryAPI", API), \
+                             patch.object(sync, "restore_nanit", lambda _: object()), \
+                             patch.object(sync, "calendar_sleep", calendar), \
+                             patch.object(sync, "strict_sleep_intervals", history):
+                            with self.assertRaises((ConnectionError, ValueError)):
+                                asyncio.run(sync.sync_day(date(2020, 9, 27)))
+                        self.assertEqual(API.writes, [])
+                        self.assertEqual(json.loads(sync.STATUS.read_text())["state"], "error")
+                        self.assertFalse(sync.health_status()[0])
+        finally:
+            sync.STATE, sync.STATUS = original_state, original_status
+
+    def test_dry_run_with_available_history_reports_success_without_write(self):
+        evening = datetime(2020, 9, 27, 20, tzinfo=ZoneInfo("America/New_York"))
+        entry = {"type": "auto_sleep", "begin_ts": evening.timestamp(),
+                 "end_ts": (evening + timedelta(hours=2)).timestamp()}
+
+        class Session:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        class API:
+            writes = []
+            def __init__(self, **kwargs): pass
+            async def authenticate(self): pass
+            async def log_sleep(self, *args, **kwargs): self.writes.append((args, kwargs))
+
+        async def calendar(*_): return [entry]
+        async def history(*_): return []
+        env = {"TZ": "America/New_York", "NANIT_BABY_UID": "baby",
+               "HUCKLEBERRY_CHILD_UID": "child", "HUCKLEBERRY_EMAIL": "test@example.invalid",
+               "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "false",
+               "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
+        original_state, original_status = sync.STATE, sync.STATUS
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                sync.STATE = Path(tmp) / "nanit_tokens.json"
+                sync.STATUS = Path(tmp) / "sync_status.json"
+                sync.save_tokens({"access_token": "a", "refresh_token": "r"})
+                with patch.dict(os.environ, env), \
+                     patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
+                     patch.object(sync, "HuckleberryAPI", API), \
+                     patch.object(sync, "restore_nanit", lambda _: object()), \
+                     patch.object(sync, "calendar_sleep", calendar), \
+                     patch.object(sync, "strict_sleep_intervals", history):
+                    asyncio.run(sync.sync_day(date(2020, 9, 27)))
+                self.assertEqual(API.writes, [])
+                self.assertEqual(json.loads(sync.STATUS.read_text())["state"], "ok")
+                self.assertTrue(sync.health_status()[0])
+        finally:
+            sync.STATE, sync.STATUS = original_state, original_status
 
     def test_calendar_uses_managed_token_and_retries_unauthorized(self):
         class Response:
