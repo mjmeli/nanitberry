@@ -6,13 +6,13 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
 
 ## Quick start with Docker Compose
 
-[compose.yaml](compose.yaml) is an example deployment. It builds the image and keeps tokens and sync status in a Docker volume mounted at `/data`. Other Docker setups only need the same environment variables and a persistent, writable `/data` mount.
+[compose.yaml](compose.yaml) is an example deployment. It pulls the published GHCR image and stores tokens and sync status in `./data`. Other Docker setups only need the same environment variables and a persistent, writable `/data` mount.
 
 1. Copy `.env.example` to `.env`. Set both account credentials and `TZ`.
-2. Build and complete Nanit's interactive MFA login:
+2. Pull the image and complete Nanit's interactive MFA login:
 
    ```sh
-   docker compose build
+   docker compose pull
    docker compose run --rm -it nanitberry python sync.py login
    ```
 
@@ -42,7 +42,13 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
 
    Startup does not backfill. The service processes the previous night each day at `RUN_AT`.
 
-For plain Docker, build with `docker build -t nanitberry .` and pass `.env` with `--env-file .env`. Mount a persistent volume or directory at `/data`; the image's default command starts the scheduler. Run commands with `docker run --rm --env-file .env -v nanitberry-state:/data nanitberry python sync.py ...` (add `-it` for `login`).
+For plain Docker, use `ghcr.io/mjmeli/nanitberry:latest` with `--env-file .env` and a persistent mount at `/data`. The image's default command starts the scheduler. Run a command with `docker run --rm --env-file .env -v nanitberry-state:/data ghcr.io/mjmeli/nanitberry:latest python sync.py ...` (add `-it` for `login`).
+
+## Images
+
+The [image workflow](.github/workflows/build-and-publish-images.yml) tests every PR and builds its image without pushing. Branch pushes and `v*` tags publish to `ghcr.io/mjmeli/nanitberry` with branch, commit, and version tags; `latest` tracks the default branch or a version tag. If the GitHub Actions secret `DOCKERHUB_TOKEN` is configured, the same tags are also published to `mjmeli/nanitberry` on Docker Hub. The token must have permission to push to that Docker Hub repository.
+
+The Compose example uses `NANITBERRY_IMAGE` to override its GHCR default. To build locally, run `docker build -t nanitberry:local .` and set `NANITBERRY_IMAGE=nanitberry:local` in `.env`. A private GHCR package requires Docker authentication to pull; package visibility is configured on GitHub.
 
 ## Configuration
 
@@ -81,3 +87,5 @@ Nanit and Huckleberry are unofficial APIs and can change. Authentication, MFA, b
 - Review a historical backfill preview against existing manual Huckleberry entries before enabling writes.
 
 Never put passwords, MFA codes, tokens, or identifying account data in source files or test fixtures.
+
+Licensed under [MIT](LICENSE).

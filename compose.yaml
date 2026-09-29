@@ -1,15 +1,10 @@
-# Example deployment. Any Docker setup can provide the same environment and /data volume.
 services:
   nanitberry:
-    container_name: nanitberry
-    build: .
+    image: ${NANITBERRY_IMAGE:-ghcr.io/mjmeli/nanitberry:latest}
     restart: unless-stopped
     env_file: .env
     volumes:
-      - nanitberry-data:/data
+      - ./data:/data
     read_only: true
     tmpfs:
       - /tmp
-
-volumes:
-  nanitberry-data:

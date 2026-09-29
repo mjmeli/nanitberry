@@ -5,3 +5,4 @@ __pycache__/
 nanit_tokens.json
 sync_status.json
 sync.lock
+data/

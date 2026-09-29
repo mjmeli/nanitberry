@@ -6,3 +6,4 @@ tests/
 *.pyc
 nanit_tokens.json
 sync_status.json
+data/
