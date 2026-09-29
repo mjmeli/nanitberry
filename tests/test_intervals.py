@@ -1,6 +1,8 @@
 """Check the sleep policy without contacting either account."""
 import importlib.util
 import asyncio
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import os
 import tempfile
@@ -175,6 +177,26 @@ class IntervalTests(unittest.TestCase):
                                  {"access_token": "new-access", "refresh_token": "new-refresh"})
         finally:
             sync.STATE, sync.NanitClient = original_state, original_client
+
+    def test_huckleberry_children_uses_account_child_cids(self):
+        class Session:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        class API:
+            def __init__(self, **kwargs): pass
+            async def authenticate(self): pass
+            async def get_user(self):
+                return types.SimpleNamespace(childList=[
+                    types.SimpleNamespace(nickname="Example", cid="child-123")])
+
+        output = StringIO()
+        env = {"HUCKLEBERRY_EMAIL": "test@example.invalid",
+               "HUCKLEBERRY_PASSWORD": "unused"}
+        with patch.dict(os.environ, env), patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(sync, "HuckleberryAPI", API), redirect_stdout(output):
+            asyncio.run(sync.huckleberry_children())
+        self.assertEqual(output.getvalue(), "Example\tchild-123\n")
 
     def test_existing_manual_sleep_and_last_second_change_block_writes(self):
         tz = ZoneInfo("America/New_York")

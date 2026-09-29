@@ -1,17 +1,15 @@
+# Example deployment. Any Docker setup can provide the same environment and /data volume.
 services:
-  sync:
+  nanitberry:
+    container_name: nanitberry
     build: .
-    container_name: nanit-huckleberry-sync
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+    env_file: .env
+    volumes:
+      - nanitberry-data:/data
     read_only: true
     tmpfs:
-      - /tmp:size=16m,noexec,nosuid
-    env_file: .env
-    environment:
-      STATE_DIR: /data
-    volumes:
-      - ${DATA_DIR:?Set DATA_DIR in .env}:/data
+      - /tmp
+
+volumes:
+  nanitberry-data:

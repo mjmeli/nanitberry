@@ -153,6 +153,23 @@ async def nanit_login():
     LOG.info("Nanit login succeeded; refresh credentials stored at %s", STATE)
 
 
+async def huckleberry_children():
+    """List the child IDs available to the configured Huckleberry account."""
+    async with aiohttp.ClientSession() as session:
+        api = HuckleberryAPI(
+            email=os.environ["HUCKLEBERRY_EMAIL"],
+            password=os.environ["HUCKLEBERRY_PASSWORD"],
+            timezone=setting("TZ", "America/New_York"),
+            websession=session,
+        )
+        await api.authenticate()
+        user = await api.get_user()
+        if user is None:
+            raise RuntimeError("Huckleberry user profile was not found")
+        for child in user.childList:
+            print(f"{child.nickname or '(unnamed)'}\t{child.cid}")
+
+
 def restore_nanit(session):
     if not STATE.exists():
         raise NanitReauthRequired("Nanit credentials have not been initialized")
@@ -400,7 +417,7 @@ async def scheduled():
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("login", "once", "backfill", "serve", "babies", "status", "healthcheck"))
+    parser.add_argument("command", choices=("login", "once", "backfill", "serve", "babies", "children", "status", "healthcheck"))
     parser.add_argument("--date", type=date.fromisoformat, help="Latest evening date, YYYY-MM-DD (once/backfill)")
     parser.add_argument("--days", type=int, help="Number of nights (backfill; otherwise BACKFILL_DAYS)")
     args = parser.parse_args()
@@ -412,6 +429,8 @@ def main():
                 for baby in await restore_nanit(session).async_get_babies():
                     print(baby.name, baby.uid)
         asyncio.run(show_babies())
+    elif args.command == "children":
+        asyncio.run(huckleberry_children())
     elif args.command == "status":
         healthy, message = health_status()
         print(json.dumps({"healthy": healthy, "message": message,
