@@ -7,7 +7,7 @@ import types
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from tests.support import sync
@@ -49,8 +49,8 @@ class ServiceTests(unittest.TestCase):
             async def authenticate(self): pass
             async def log_sleep(self, *args, **kwargs): self.writes.append((args, kwargs))
 
-        env = {"TZ": "America/New_York", "NANIT_BABY_UID": "baby",
-               "HUCKLEBERRY_CHILD_UID": "child", "HUCKLEBERRY_EMAIL": "test@example.invalid",
+        env = {"TZ": "America/New_York", "CHILD_UID_MAP": '{"baby":"child"}',
+               "HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "true",
                "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
         original_state, original_status = sync.STATE, sync.STATUS
@@ -73,6 +73,7 @@ class ServiceTests(unittest.TestCase):
                              patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
                              patch.object(sync, "HuckleberryAPI", API), \
                              patch.object(sync, "restore_nanit", lambda _: object()), \
+                             patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
                              patch.object(sync, "calendar_sleep", calendar), \
                              patch.object(sync, "strict_sleep_intervals", history):
                             with self.assertRaises((ConnectionError, ValueError)):
@@ -100,8 +101,8 @@ class ServiceTests(unittest.TestCase):
 
         async def calendar(*_): return [entry]
         async def history(*_): return []
-        env = {"TZ": "America/New_York", "NANIT_BABY_UID": "baby",
-               "HUCKLEBERRY_CHILD_UID": "child", "HUCKLEBERRY_EMAIL": "test@example.invalid",
+        env = {"TZ": "America/New_York", "CHILD_UID_MAP": '{"baby":"child"}',
+               "HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "false",
                "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
         original_state, original_status = sync.STATE, sync.STATUS
@@ -114,6 +115,7 @@ class ServiceTests(unittest.TestCase):
                      patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
                      patch.object(sync, "HuckleberryAPI", API), \
                      patch.object(sync, "restore_nanit", lambda _: object()), \
+                     patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
                      patch.object(sync, "calendar_sleep", calendar), \
                      patch.object(sync, "strict_sleep_intervals", history):
                     asyncio.run(sync.sync_day(date(2020, 9, 27)))

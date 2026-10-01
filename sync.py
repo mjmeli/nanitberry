@@ -27,6 +27,10 @@ class NanitReauthRequired(RuntimeError):
     """A fresh interactive MFA login is required."""
 
 
+class UidSelectionRequired(RuntimeError):
+    """An account has no unambiguous child to sync."""
+
+
 def utc_now():
     return datetime.now(ZoneInfo("UTC")).isoformat()
 
@@ -60,6 +64,8 @@ def private_json(path, data, **kwargs):
 
 
 def failure_reason(exc):
+    if isinstance(exc, UidSelectionRequired):
+        return "uid_selection_required", str(exc)
     if isinstance(exc, (NanitReauthRequired, NanitAuthError)):
         return "nanit_reauth_required", "Run: docker compose run --rm -it nanitberry python sync.py login"
     if isinstance(exc, NanitConnectionError):
@@ -168,6 +174,112 @@ async def huckleberry_children():
             raise RuntimeError("Huckleberry user profile was not found")
         for child in user.childList:
             print(f"{child.nickname or '(unnamed)'}\t{child.cid}")
+
+
+def select_uid(items, account):
+    """Log available children and select one only when unambiguous."""
+    for name, uid in items:
+        LOG.info("Available %s child: %s (UID: %s)", account, name, uid)
+    if len(items) == 1:
+        if not isinstance(items[0][1], str) or not items[0][1].strip():
+            raise UidSelectionRequired(f"The only {account} child has no usable UID")
+        LOG.info("Using the only %s child", account)
+        return items[0][1]
+    if not items:
+        raise UidSelectionRequired(f"No {account} children found; check account access")
+    raise UidSelectionRequired(
+        f"Multiple {account} children found; set CHILD_UID_MAP with matching UIDs shown above")
+
+
+def configured_uid_pairs():
+    """Return explicit Nanit-to-Huckleberry pairs, if configured."""
+    raw = os.getenv("CHILD_UID_MAP", "").strip()
+    if not raw:
+        return None
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate Nanit UID")
+            result[key] = value
+        return result
+
+    try:
+        mapping = json.loads(raw, object_pairs_hook=unique_keys)
+    except ValueError as exc:
+        raise UidSelectionRequired("CHILD_UID_MAP must be a JSON object with unique Nanit UIDs") from exc
+    if (not isinstance(mapping, dict) or not mapping
+            or any(not isinstance(nanit, str) or not nanit.strip()
+                   or not isinstance(huckleberry, str) or not huckleberry.strip()
+                   for nanit, huckleberry in mapping.items())):
+        raise UidSelectionRequired("CHILD_UID_MAP must map nonempty Nanit UIDs to Huckleberry UIDs")
+    if len(set(mapping.values())) != len(mapping):
+        raise UidSelectionRequired("Each Huckleberry UID in CHILD_UID_MAP must be used once")
+    return list(mapping.items())
+
+
+async def nanit_uid_from_account(session):
+    babies = await restore_nanit(session).async_get_babies()
+    return select_uid([(baby.name, baby.uid) for baby in babies], "Nanit")
+
+
+async def huckleberry_uid_from_account(api):
+    user = await api.get_user()
+    if user is None:
+        raise UidSelectionRequired("Huckleberry user profile was not found")
+    return select_uid([(child.nickname or "(unnamed)", child.cid)
+                       for child in user.childList], "Huckleberry")
+
+
+async def validate_uid_pairs(nanit, api, pairs):
+    """Reject mapped UIDs that are not in the authenticated accounts."""
+    babies = await nanit.async_get_babies()
+    user = await api.get_user()
+    if user is None:
+        raise UidSelectionRequired("Huckleberry user profile was not found")
+    nanit_uids = {baby.uid for baby in babies}
+    huckleberry_uids = {child.cid for child in user.childList}
+    for nanit_uid, huckleberry_uid in pairs:
+        if nanit_uid not in nanit_uids:
+            raise UidSelectionRequired(f"Nanit UID {nanit_uid} in CHILD_UID_MAP is not in this account")
+        if huckleberry_uid not in huckleberry_uids:
+            raise UidSelectionRequired(
+                f"Huckleberry UID {huckleberry_uid} in CHILD_UID_MAP is not in this account")
+
+
+async def log_missing_uids():
+    """Show setup choices in container logs as soon as the service starts."""
+    try:
+        pairs = configured_uid_pairs()
+    except UidSelectionRequired as exc:
+        LOG.warning("UID configuration: %s", exc)
+        return
+    if pairs is not None:
+        return
+    async with aiohttp.ClientSession() as session:
+        try:
+            await asyncio.wait_for(nanit_uid_from_account(session), timeout=30)
+        except Exception as exc:
+            LOG.warning("Nanit UID discovery: %s", discovery_message(exc))
+        try:
+            api = HuckleberryAPI(email=os.environ["HUCKLEBERRY_EMAIL"],
+                                 password=os.environ["HUCKLEBERRY_PASSWORD"],
+                                 timezone=setting("TZ", "America/New_York"),
+                                 websession=session)
+            await asyncio.wait_for(api.authenticate(), timeout=30)
+            await asyncio.wait_for(huckleberry_uid_from_account(api), timeout=30)
+        except Exception as exc:
+            LOG.warning("Huckleberry UID discovery: %s", discovery_message(exc))
+
+
+def discovery_message(exc):
+    if isinstance(exc, KeyError):
+        return f"Set {exc.args[0]} to look up children"
+    if isinstance(exc, NanitReauthRequired):
+        return "Nanit login is required before baby UIDs can be listed"
+    if isinstance(exc, UidSelectionRequired):
+        return str(exc)
+    return f"lookup failed ({type(exc).__name__}); retry when the account is available"
 
 
 def restore_nanit(session):
@@ -351,51 +463,58 @@ async def _sync_day(day):
         raise ValueError("MAX_DAY_WAKE_MINUTES must be between 0 and 180")
     write = boolean("WRITE_ENABLED")
     include_day = boolean("SYNC_DAYTIME")
-    nanit_uid = os.getenv("NANIT_BABY_UID")
-    huckleberry_uid = os.getenv("HUCKLEBERRY_CHILD_UID")
-    if not nanit_uid or not huckleberry_uid:
-        raise RuntimeError("Set NANIT_BABY_UID and HUCKLEBERRY_CHILD_UID explicitly")
+    pairs = configured_uid_pairs()
+    mapped = pairs is not None
     async with aiohttp.ClientSession() as websession:
+        if pairs is None:
+            nanit_uid = await nanit_uid_from_account(websession)
         api = HuckleberryAPI(email=os.environ["HUCKLEBERRY_EMAIL"],
                              password=os.environ["HUCKLEBERRY_PASSWORD"],
                              timezone=str(tz), websession=websession)
         await api.authenticate()
-        night_start = parse_clock(setting("NIGHT_START", "18:00"))
-        morning_cutoff = parse_clock(setting("MORNING_CUTOFF", "10:00"))
-        if boolean("USE_HUCKLEBERRY_HOURS"):
-            child = await api.get_child(huckleberry_uid)
-            if child is None or child.nightStart is None or child.morningCutoff is None:
-                raise RuntimeError("Huckleberry nightStart/morningCutoff unavailable; configure explicit hours")
-            night_start = parse_clock(child.nightStart)
-            morning_cutoff = parse_clock(child.morningCutoff)
-        ranges = windows(day, tz, night_start, morning_cutoff, include_day)
-        fetch_start = ranges[0][1]
-        fetch_end = ranges[-1][2]
-        if fetch_end.timestamp() > datetime.now(timezone.utc).timestamp() - 30 * 60:
-            raise RuntimeError("Window is not complete; schedule after morning cutoff plus 30 minutes")
+        if pairs is None:
+            huckleberry_uid = await huckleberry_uid_from_account(api)
+            pairs = [(nanit_uid, huckleberry_uid)]
         nanit = restore_nanit(websession)
-        calendar = await calendar_sleep(nanit, nanit_uid, fetch_start, fetch_end)
-        # This strict read propagates failures. The library's list_sleep_intervals
-        # catches some Firestore errors and otherwise returns an unsafe empty list.
-        existing = [existing_range(x) for x in await strict_sleep_intervals(
-            api, huckleberry_uid, fetch_start, fetch_end)]
-        for kind, start, end in ranges:
-            spans = normalize(calendar, start, end, (gap if kind == "night" else day_gap) * 60)
-            LOG.info("%s %s: %d Nanit interval(s)", day, kind, len(spans))
-            for span in spans:
-                if any(overlap(span, old) for old in existing):
-                    LOG.warning("Skipping %s–%s: overlaps existing Huckleberry sleep", *span)
-                    continue
-                LOG.info("%s %s–%s (%s)", "WRITE" if write else "DRY RUN", *span, kind)
-                if write:
-                    # Re-read immediately before writing in case the app changed mid-run.
-                    current = [existing_range(x) for x in await strict_sleep_intervals(
-                        api, huckleberry_uid, span[0], span[1])]
-                    if any(overlap(span, old) for old in current):
-                        LOG.warning("Skipping %s–%s: Huckleberry changed during sync", *span)
+        if mapped:
+            await validate_uid_pairs(nanit, api, pairs)
+        for nanit_uid, huckleberry_uid in pairs:
+            LOG.info("Syncing Nanit %s to Huckleberry %s", nanit_uid, huckleberry_uid)
+            night_start = parse_clock(setting("NIGHT_START", "18:00"))
+            morning_cutoff = parse_clock(setting("MORNING_CUTOFF", "10:00"))
+            if boolean("USE_HUCKLEBERRY_HOURS"):
+                child = await api.get_child(huckleberry_uid)
+                if child is None or child.nightStart is None or child.morningCutoff is None:
+                    raise RuntimeError("Huckleberry nightStart/morningCutoff unavailable; configure explicit hours")
+                night_start = parse_clock(child.nightStart)
+                morning_cutoff = parse_clock(child.morningCutoff)
+            ranges = windows(day, tz, night_start, morning_cutoff, include_day)
+            fetch_start = ranges[0][1]
+            fetch_end = ranges[-1][2]
+            if fetch_end.timestamp() > datetime.now(timezone.utc).timestamp() - 30 * 60:
+                raise RuntimeError("Window is not complete; schedule after morning cutoff plus 30 minutes")
+            calendar = await calendar_sleep(nanit, nanit_uid, fetch_start, fetch_end)
+            # This strict read propagates failures. The library's list_sleep_intervals
+            # catches some Firestore errors and otherwise returns an unsafe empty list.
+            existing = [existing_range(x) for x in await strict_sleep_intervals(
+                api, huckleberry_uid, fetch_start, fetch_end)]
+            for kind, start, end in ranges:
+                spans = normalize(calendar, start, end, (gap if kind == "night" else day_gap) * 60)
+                LOG.info("%s %s: %d Nanit interval(s)", day, kind, len(spans))
+                for span in spans:
+                    if any(overlap(span, old) for old in existing):
+                        LOG.warning("Skipping %s–%s: overlaps existing Huckleberry sleep", *span)
                         continue
-                    await api.log_sleep(huckleberry_uid, start_time=span[0], end_time=span[1])
-                    existing.append(span)
+                    LOG.info("%s %s–%s (%s)", "WRITE" if write else "DRY RUN", *span, kind)
+                    if write:
+                        # Re-read immediately before writing in case the app changed mid-run.
+                        current = [existing_range(x) for x in await strict_sleep_intervals(
+                            api, huckleberry_uid, span[0], span[1])]
+                        if any(overlap(span, old) for old in current):
+                            LOG.warning("Skipping %s–%s: Huckleberry changed during sync", *span)
+                            continue
+                        await api.log_sleep(huckleberry_uid, start_time=span[0], end_time=span[1])
+                        existing.append(span)
 
 
 async def scheduled():
@@ -449,6 +568,7 @@ def main():
         days = args.days if args.days is not None else int(setting("BACKFILL_DAYS", "7"))
         asyncio.run(backfill(latest, days))
     else:
+        asyncio.run(log_missing_uids())
         try:
             prior = json.loads(STATUS.read_text()) if STATUS.exists() else {}
         except (OSError, ValueError):

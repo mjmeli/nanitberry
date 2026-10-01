@@ -7,7 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from tests.support import sync
@@ -152,11 +152,12 @@ class HuckleberryTests(unittest.TestCase):
 
         async def calendar(*_): return [entry]
         async def history(*_): return [old]
-        env = {"TZ": "America/New_York", "NANIT_BABY_UID": "baby",
-               "HUCKLEBERRY_CHILD_UID": "child", "HUCKLEBERRY_EMAIL": "test@example.invalid",
+        env = {"TZ": "America/New_York", "CHILD_UID_MAP": '{"baby":"child"}',
+               "HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "true"}
         with patch.dict(os.environ, env), patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
              patch.object(sync, "HuckleberryAPI", API), patch.object(sync, "restore_nanit", lambda _: object()), \
+             patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
              patch.object(sync, "calendar_sleep", calendar), patch.object(sync, "strict_sleep_intervals", history):
             asyncio.run(sync._sync_day(date(2020, 9, 27)))
         self.assertEqual(API.writes, [])
@@ -167,6 +168,7 @@ class HuckleberryTests(unittest.TestCase):
         changed_history.calls = 0
         with patch.dict(os.environ, env), patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
              patch.object(sync, "HuckleberryAPI", API), patch.object(sync, "restore_nanit", lambda _: object()), \
+             patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
              patch.object(sync, "calendar_sleep", calendar), patch.object(sync, "strict_sleep_intervals", changed_history):
             asyncio.run(sync._sync_day(date(2020, 9, 27)))
         self.assertEqual(changed_history.calls, 2)

@@ -16,14 +16,14 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
    docker compose run --rm -it nanitberry python sync.py login
    ```
 
-3. List the IDs for the same child in each account, then set `NANIT_BABY_UID` and `HUCKLEBERRY_CHILD_UID` in `.env`:
+3. Start the service with `CHILD_UID_MAP` blank (`docker compose up -d`), then view `docker compose logs nanitberry` or the container logs in Portainer. Startup logs list available Nanit babies and Huckleberry children with their UIDs. If each account has exactly one child, that child is selected automatically for each sync. To choose one child or sync several children, set `CHILD_UID_MAP` as described below and restart the service. You can also list the IDs with:
 
    ```sh
    docker compose run --rm nanitberry python sync.py babies
    docker compose run --rm nanitberry python sync.py children
    ```
 
-   `babies` prints Nanit baby names and UIDs. `children` prints Huckleberry nicknames and `cid` values. The Huckleberry child UID is the `cid`.
+   `babies` prints Nanit baby names and UIDs. `children` prints Huckleberry nicknames and `cid` values. The Huckleberry child UID is the `cid`. Nanit baby lookup requires the saved token pair from step 2; until then, startup logs explain that login is needed. Huckleberry children can still be listed independently. With `CHILD_UID_MAP` blank, the service lists available IDs on each restart.
 
 4. Preview one completed night while writes are disabled:
 
@@ -33,7 +33,7 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
 
    The date is the evening the night began. Omit `--date` to use the previous evening. Compare the proposed intervals with both apps. To review history, preview `backfill --days 7` while writes are disabled.
 
-5. Set `WRITE_ENABLED=true` only when the previews look right. Run `once` or an explicit `backfill` to import selected history, then start the daily service:
+5. Set `WRITE_ENABLED=true` only when the previews look right. Run `once` or an explicit `backfill` to import selected history, then restart the daily service with the updated configuration:
 
    ```sh
    docker compose run --rm nanitberry python sync.py backfill --days 7
@@ -52,7 +52,13 @@ The Compose example uses `NANITBERRY_IMAGE` to override its GHCR default. To bui
 
 ## Configuration
 
-Required for sync: `NANIT_BABY_UID`, `HUCKLEBERRY_EMAIL`, `HUCKLEBERRY_PASSWORD`, and `HUCKLEBERRY_CHILD_UID`. `NANIT_EMAIL` and `NANIT_PASSWORD` are needed for interactive login; scheduled runs use the saved token pair. Keep `.env` private.
+Required for sync: `HUCKLEBERRY_EMAIL`, `HUCKLEBERRY_PASSWORD`, and a saved Nanit token pair. `CHILD_UID_MAP` is the only UID setting. Leave it blank to select automatically when **both** accounts have exactly one child. Otherwise, set a JSON object mapping each Nanit UID to its matching Huckleberry UID. Use one entry to sync one selected child, or several entries to sync several children:
+
+```dotenv
+CHILD_UID_MAP={"nanit-uid-1":"huckleberry-uid-1","nanit-uid-2":"huckleberry-uid-2"}
+```
+
+Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled run, preview, and backfill processes all mapped pairs in order. Preview all pairs before enabling writes; if a later pair fails after an earlier pair was written, rerunning is safe because existing Huckleberry intervals are checked again. `NANIT_EMAIL` and `NANIT_PASSWORD` are needed for interactive login; scheduled runs use the saved token pair. Keep `.env` private. Container logs contain child names and UIDs during discovery.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
