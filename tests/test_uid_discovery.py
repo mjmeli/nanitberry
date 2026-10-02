@@ -71,7 +71,8 @@ class UidDiscoveryTests(unittest.TestCase):
             return []
 
         env = {"TZ": "America/New_York", "CHILD_UID_MAP": "",
-               "HUCKLEBERRY_EMAIL": "test@example.invalid", "HUCKLEBERRY_PASSWORD": "unused"}
+               "HUCKLEBERRY_EMAIL": "test@example.invalid", "HUCKLEBERRY_PASSWORD": "unused",
+               "USE_HUCKLEBERRY_HOURS": "false"}
         with patch.dict(os.environ, env), \
              patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
              patch.object(sync, "HuckleberryAPI", API), \
