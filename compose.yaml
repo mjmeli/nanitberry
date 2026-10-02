@@ -2,7 +2,23 @@ services:
   nanitberry:
     image: ghcr.io/mjmeli/nanitberry:latest
     restart: unless-stopped
-    env_file: .env
+    environment:
+      TZ: America/New_York
+      NANIT_EMAIL: ${NANIT_EMAIL}
+      NANIT_PASSWORD: ${NANIT_PASSWORD}
+      HUCKLEBERRY_EMAIL: ${HUCKLEBERRY_EMAIL}
+      HUCKLEBERRY_PASSWORD: ${HUCKLEBERRY_PASSWORD}
+      CHILD_UID_MAP: ""
+      HEALTH_MAX_AGE_HOURS: "36"
+      BACKFILL_DAYS: "7"
+      USE_HUCKLEBERRY_HOURS: "true"
+      # Used only when USE_HUCKLEBERRY_HOURS is false.
+      NIGHT_START: "18:00"
+      MORNING_CUTOFF: "10:00"
+      MAX_WAKE_MINUTES: "20"
+      SYNC_DAYTIME: "false"
+      WRITE_ENABLED: "false"
+      STATE_DIR: /data
     volumes:
       - ./data:/data
     read_only: true

@@ -6,9 +6,9 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
 
 ## Quick start with Docker Compose
 
-[compose.yaml](compose.yaml) is an example deployment. It pulls the published GHCR image and stores tokens and sync status in `./data`. Other Docker setups only need the same environment variables and a persistent, writable `/data` mount.
+[compose.yaml](compose.yaml) is an example deployment. It lists all service settings, pulls the published GHCR image, and stores tokens and sync status in `./data`. Other Docker setups only need the same environment variables and a persistent, writable `/data` mount. [compose.local.yaml](compose.local.yaml) is an optional image override for local builds; it is not needed for Portainer or the published image.
 
-1. Copy `.env.example` to `.env`. Set both account credentials and `TZ`.
+1. For local Compose use, copy `.env.example` to `.env` and set both account credentials. For Portainer, set the four credential variables in the stack's environment variables instead. Adjust `TZ` and any other settings in `compose.yaml` for your deployment. Keep credentials out of the committed Compose file. On a NAS, replace `./data` with a writable host path dedicated to nanitberry.
 2. Pull the image and complete Nanit's interactive MFA login:
 
    ```sh
@@ -33,7 +33,7 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
 
    The date is the evening the night began. Omit `--date` to use the previous evening. Compare the proposed intervals with both apps. To review history, preview `backfill --days 7` while writes are disabled.
 
-5. Set `WRITE_ENABLED=true` only when the previews look right. Run `once` or an explicit `backfill` to import selected history, then restart the service with the updated configuration:
+5. Set `WRITE_ENABLED: "true"` in `compose.yaml` only when the previews look right. Run `once` or an explicit `backfill` to import selected history, then restart the service with the updated configuration:
 
    ```sh
    docker compose run --rm nanitberry python sync.py backfill --days 7
@@ -48,17 +48,17 @@ For plain Docker, use `ghcr.io/mjmeli/nanitberry:latest` with `--env-file .env` 
 
 The [image workflow](.github/workflows/build-and-publish-images.yml) tests every PR and builds its image without pushing. Branch pushes and `v*` tags publish to `ghcr.io/mjmeli/nanitberry` with branch, commit, and version tags; `latest` tracks the default branch or a version tag. If the GitHub Actions secret `DOCKERHUB_TOKEN` is configured, the same tags are also published to `mjmeli/nanitberry` on Docker Hub. The token must have permission to push to that Docker Hub repository.
 
-The Compose example uses the published GHCR image. To test a local build, run `docker build -t nanitberry:local .` and add `-f compose.yaml -f compose.local.yaml` to your Compose commands. The image does not need to be in `.env`. A private GHCR package requires Docker authentication to pull; package visibility is configured on GitHub.
+The Compose example uses the published GHCR image. To test a local build, run `docker build -t nanitberry:local .` and add `-f compose.yaml -f compose.local.yaml` to your Compose commands. The small second file only changes the image name, so the published-image deployment stays usable without a local build. A private GHCR package requires Docker authentication to pull; package visibility is configured on GitHub.
 
 ## Configuration
 
 Required for sync: `HUCKLEBERRY_EMAIL`, `HUCKLEBERRY_PASSWORD`, and a saved Nanit token pair. The first Huckleberry login saves a refresh token in `/data/huckleberry_tokens.json`; later runs refresh it without another password login. `CHILD_UID_MAP` is the only UID setting. Leave it blank to select automatically when **both** accounts have exactly one child. Otherwise, set a JSON object mapping each Nanit UID to its matching Huckleberry UID. Use one entry to sync one selected child, or several entries to sync several children:
 
-```dotenv
-CHILD_UID_MAP={"nanit-uid-1":"huckleberry-uid-1","nanit-uid-2":"huckleberry-uid-2"}
+```yaml
+CHILD_UID_MAP: '{"nanit-uid-1":"huckleberry-uid-1","nanit-uid-2":"huckleberry-uid-2"}'
 ```
 
-Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled run, preview, and backfill processes all mapped pairs in order. Preview all pairs before enabling writes; if a later pair fails after an earlier pair was written, rerunning is safe because existing Huckleberry intervals are checked again. `NANIT_EMAIL` and `NANIT_PASSWORD` are needed for interactive login; scheduled runs use the saved token pair. Keep `.env` private. Container logs contain child names and UIDs during discovery.
+Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled run, preview, and backfill processes all mapped pairs in order. Preview all pairs before enabling writes; if a later pair fails after an earlier pair was written, rerunning is safe because existing Huckleberry intervals are checked again. Set `CHILD_UID_MAP` in `compose.yaml` when needed; values in `.env` do not override settings listed directly in the Compose file. `NANIT_EMAIL` and `NANIT_PASSWORD` are needed for interactive login; scheduled runs use the saved token pair. Keep `.env` private. Container logs contain child names and UIDs during discovery.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
