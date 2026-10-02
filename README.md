@@ -1,14 +1,11 @@
 # nanitberry
 
-Sync completed Nanit sleep into Huckleberry from a small Docker service. Short overnight wake gaps can be bridged; longer wakes produce separate Huckleberry sleep entries. The gap threshold is configurable.
-
-The default is **night-only, dry-run**. Daytime sync is optional, and writes require `WRITE_ENABLED=true`. The importer reads Nanit calendar entries of type `auto_sleep`; manually logged Nanit naps are not imported.
+Nanitberry copies completed automatic sleep from Nanit to Huckleberry. It runs on a schedule and can combine sleep segments separated by a short wake. It starts in **dry-run, night-only mode**; it never writes to Huckleberry until you enable writes.
 
 ## Quick start with Docker Compose
 
-[compose.yaml](compose.yaml) is an example deployment. It lists all service settings, pulls the published GHCR image, and stores tokens and sync status in `./data`. Other Docker setups only need the same environment variables and a persistent, writable `/data` mount. [compose.local.yaml](compose.local.yaml) is an optional image override for local builds; it is not needed when using the published image.
+1. Copy `.env.example` to `.env` and add your Nanit and Huckleberry email addresses and passwords. Keep `.env` private.
 
-1. Copy `.env.example` to `.env` and set both account credentials, or provide the variables through your shell environment. All settings are listed in both files; Compose substitutes values from `.env` or the shell into `compose.yaml`, using the listed defaults when optional values are absent. It fails early if a credential is missing. The commented `env_file` line is optional: uncomment it to also pass variables from `.env` directly into the container. Entries under `environment` take precedence. Replace `./data` with a writable host path if needed. Keep credentials out of the committed Compose file.
 2. Pull the image and complete Nanit's interactive MFA login:
 
    ```sh
@@ -16,96 +13,102 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
    docker compose run --rm -it nanitberry python sync.py login
    ```
 
-3. Start the service with `CHILD_UID_MAP` blank (`docker compose up -d`), then view `docker compose logs nanitberry`. Startup logs list available Nanit babies and Huckleberry children with their UIDs. If each account has exactly one child, that child is selected automatically for each sync. To choose one child or sync several children, set `CHILD_UID_MAP` as described below and restart the service. You can also list the IDs with:
+   If your infrastructure cannot run an interactive `docker compose run`, start the service and run the login command in its container instead:
 
    ```sh
-   docker compose run --rm nanitberry python sync.py babies
-   docker compose run --rm nanitberry python sync.py children
+   docker compose up -d
+   docker compose exec nanitberry python sync.py login
    ```
 
-   `babies` prints Nanit baby names and UIDs. `children` prints Huckleberry nicknames and `cid` values. The Huckleberry child UID is the `cid`. Nanit baby lookup requires the saved token pair from step 2; until then, startup logs explain that login is needed. Huckleberry children can still be listed independently. With `CHILD_UID_MAP` blank, the service lists available IDs on each restart.
+3. If either account has more than one child, map the Nanit and Huckleberry child IDs as described under [Child selection](#child-selection). With one child in each account, nanitberry selects them automatically.
 
-4. Preview one completed night while writes are disabled:
+4. Preview a completed night with writes still disabled:
 
    ```sh
    docker compose run --rm nanitberry python sync.py once --date YYYY-MM-DD
    ```
 
-   The date is the evening the night began. Omit `--date` to use the previous evening. Compare the proposed intervals with both apps. To review history, preview `backfill --days 7` while writes are disabled.
+   Use the date the night began. Omit `--date` to preview the previous night. Check the proposed sleep times in both apps before enabling writes.
 
-5. Set `WRITE_ENABLED: "true"` in `compose.yaml` only when the previews look right. Run `once` or an explicit `backfill` to import selected history, then restart the service with the updated configuration:
+5. When the preview looks right, set `WRITE_ENABLED: "true"` in `compose.yaml`. To import earlier nights, run an explicit backfill; then start or restart the service:
 
    ```sh
    docker compose run --rm nanitberry python sync.py backfill --days 7
    docker compose up -d
    ```
 
-   Startup does not backfill. The service checks the previous night on every quarter hour, so a 7:15 a.m. cutoff is checked at 7:15 when the service is running. It begins importing completed sleep at the morning cutoff and keeps checking for a sleep that continues past it. A segment is held until its configured wake-gap period has elapsed, so a short wake can still join resumed sleep in one Huckleberry entry. With the default 20-minute gap, a newly ended segment is normally imported at the first 15-minute check at least 20 minutes later.
+   The service does not backfill on startup. It checks the previous night every 15 minutes after the morning cutoff. It waits for the configured wake gap to pass before importing a finished sleep, so a brief wake can still be joined to resumed sleep.
 
-For plain Docker, use `ghcr.io/mjmeli/nanitberry:latest` with `--env-file .env` and a persistent mount at `/data`. The image's default command starts the scheduler. Run a command with `docker run --rm --env-file .env -v nanitberry-state:/data ghcr.io/mjmeli/nanitberry:latest python sync.py ...` (add `-it` for `login`).
-
-## Images
-
-The [image workflow](.github/workflows/build-and-publish-images.yml) tests every PR and builds its image without pushing. Branch pushes and `v*` tags publish to `ghcr.io/mjmeli/nanitberry` with branch, commit, and version tags; `latest` tracks the default branch or a version tag. If the GitHub Actions secret `DOCKERHUB_TOKEN` is configured, the same tags are also published to `mjmeli/nanitberry` on Docker Hub. The token must have permission to push to that Docker Hub repository.
-
-The Compose example uses the published GHCR image. To test a local build, run `docker build -t nanitberry:local .` and add `-f compose.yaml -f compose.local.yaml` to your Compose commands. The small second file only changes the image name, so the published-image deployment stays usable without a local build. A private GHCR package requires Docker authentication to pull; package visibility is configured on GitHub.
+The Compose file stores tokens and sync status in `./data`. Replace that path if you need a different writable, persistent location.
 
 ## Configuration
 
-Required for sync: `HUCKLEBERRY_EMAIL`, `HUCKLEBERRY_PASSWORD`, and a saved Nanit token pair. The first Huckleberry login saves a refresh token in `/data/huckleberry_tokens.json`; later runs refresh it without another password login. `CHILD_UID_MAP` is the only UID setting. Leave it blank to select automatically when **both** accounts have exactly one child. Otherwise, set a JSON object mapping each Nanit UID to its matching Huckleberry UID. Use one entry to sync one selected child, or several entries to sync several children:
-
-```yaml
-CHILD_UID_MAP: '{"nanit-uid-1":"huckleberry-uid-1","nanit-uid-2":"huckleberry-uid-2"}'
-```
-
-Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled run, preview, and backfill processes all mapped pairs in order. Preview all pairs before enabling writes; if a later pair fails after an earlier pair was written, rerunning is safe because existing Huckleberry intervals are checked again. Set `CHILD_UID_MAP` in `.env`, your shell environment, or directly in `compose.yaml` when needed. `NANIT_EMAIL` and `NANIT_PASSWORD` are needed for interactive login; scheduled runs use the saved token pair. Keep any `.env` file private. Container logs contain child names and UIDs during discovery.
+Compose reads values from `.env` or your shell. The required Nanit and Huckleberry credentials are listed in `.env.example` and `compose.yaml`. Nanit credentials are used for the interactive login; the saved Nanit token is used for later syncs. Huckleberry credentials are used to authenticate and refresh its saved session.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TZ` | `America/New_York` | IANA time zone for scheduling and sleep windows |
-| `USE_HUCKLEBERRY_HOURS` | `true` | Read each child's night start and morning cutoff from its Huckleberry profile |
-| `NIGHT_START` | `18:00` | Evening boundary only when `USE_HUCKLEBERRY_HOURS=false` |
-| `MORNING_CUTOFF` | `10:00` | Morning boundary only when `USE_HUCKLEBERRY_HOURS=false` |
-| `MAX_WAKE_MINUTES` | `20` | Bridge wake gaps up to this length in night and optional daytime sleep; `0` disables bridging |
-| `SYNC_DAYTIME` | `false` | Also consider automatic sleep between morning cutoff and night start |
-| `WRITE_ENABLED` | `false` | Enable Huckleberry writes |
-| `BACKFILL_DAYS` | `7` | Number of completed nights for an explicit `backfill` (1–365) |
-| `HEALTH_MAX_AGE_HOURS` | `36` | Mark sync unhealthy when the last success is too old |
+| `TZ` | `America/New_York` | Time zone used for sleep windows and scheduled checks |
+| `USE_HUCKLEBERRY_HOURS` | `true` | Use each child's night start and morning cutoff from their Huckleberry profile |
+| `NIGHT_START` | `18:00` | Night start when `USE_HUCKLEBERRY_HOURS=false` |
+| `MORNING_CUTOFF` | `10:00` | Morning cutoff when `USE_HUCKLEBERRY_HOURS=false` |
+| `MAX_WAKE_MINUTES` | `20` | Join sleep segments separated by a wake of this length or less; `0` disables joining |
+| `SYNC_DAYTIME` | `false` | Also sync automatic sleep during the day |
+| `WRITE_ENABLED` | `false` | Allow new sleep entries to be written to Huckleberry |
+| `BACKFILL_DAYS` | `7` | Default number of nights for an explicit backfill |
+| `HEALTH_MAX_AGE_HOURS` | `36` | Mark the service unhealthy if it has not synced successfully within this many hours |
+
+### Child selection
+
+When both accounts have exactly one child, nanitberry selects that pair automatically. If either account has multiple children, set `CHILD_UID_MAP` to a JSON object pairing Nanit IDs with Huckleberry IDs. Use one pair to sync one child, or add more pairs to sync multiple children:
+
+```text
+{"nanit-uid-1":"huckleberry-uid-1","nanit-uid-2":"huckleberry-uid-2"}
+```
+
+To find the IDs, run:
+
+```sh
+docker compose run --rm nanitberry python sync.py babies
+docker compose run --rm nanitberry python sync.py children
+```
+
+The Nanit `babies` command needs the saved token from the login step. `children` lists Huckleberry children. Put the JSON value in `.env` as `CHILD_UID_MAP='{"nanit-uid-1":"huckleberry-uid-1"}'`, in your shell, or in `compose.yaml` as `CHILD_UID_MAP: '{"nanit-uid-1":"huckleberry-uid-1"}'`. Each ID can appear only once.
 
 ## How night sleep is defined
 
-By default, each child's Huckleberry profile supplies the night start and morning cutoff. Its values may be `HH:MM` or fractional hours: night start `8.0` means 8 p.m., and morning cutoff `7.25` means 7:15 a.m. With those settings, the night window for an evening date runs from **8:00 p.m. to 7:15 a.m. the next day**.
+By default, each child's night begins and ends at the night start and morning cutoff in their Huckleberry profile. You can instead set `USE_HUCKLEBERRY_HOURS=false` and configure `NIGHT_START` and `MORNING_CUTOFF` yourself. For example, an 8 p.m. to 7 a.m. window covers sleep that overlaps that period.
 
-Nanitberry joins automatic Nanit sleep segments separated by at most `MAX_WAKE_MINUTES` (20 by default). A resulting interval belongs to that night if it **ends after 8:00 p.m. and begins before 7:15 a.m.** The boundaries decide which night owns the interval; they do not trim its start or end. For example:
+Nanitberry uses the night window to decide which night owns a sleep interval; it keeps the interval's actual start and end times. So sleep from 7:45 p.m. to 7:20 a.m. is included in full. Sleep ending before 8 p.m. or starting after 7 a.m. is daytime sleep. A sleep segment after 7 a.m. can still be joined to the night if it follows a night segment within `MAX_WAKE_MINUTES`.
 
-| Nanit sleep | Night sleep? | Interval sent to Huckleberry |
-| --- | --- | --- |
-| 7:45 p.m.–7:30 a.m. | Yes; crosses both boundaries | 7:45 p.m.–7:30 a.m. |
-| 7:45 p.m.–10:00 p.m. | Yes; starts before night start | 7:45 p.m.–10:00 p.m. |
-| 11:00 p.m.–7:30 a.m. | Yes; ends after morning cutoff | 11:00 p.m.–7:30 a.m. |
-| 11:00 p.m.–6:00 a.m. | Yes; entirely inside the window | 11:00 p.m.–6:00 a.m. |
-| 7:00 p.m.–7:45 p.m. | No; ends before night start | None in night-only mode |
-| 7:30 a.m.–8:00 a.m. | No; starts after morning cutoff | None in night-only mode |
+Adjacent automatic sleep segments separated by no more than `MAX_WAKE_MINUTES` are combined into one interval, including the wake minutes. A longer gap leaves them separate. In-progress sleep is held for a later check, and completed sleep is only imported after the wake-gap period has passed.
 
-Ending exactly at 8:00 p.m. does not overlap the night; starting exactly at 7:15 a.m. belongs to daytime. A post-cutoff segment *can* be part of night sleep when it follows a pre-cutoff segment within the wake-gap threshold. In that case the joined interval, including the wake minutes, is logged as one night entry. A longer gap leaves separate intervals, and a new post-cutoff interval is not night sleep. `SYNC_DAYTIME=true` also considers daytime intervals; one that crosses night start is assigned to night only once.
+## Conflicts with manual sleep
 
-For each night, the Nanit calendar search starts at that evening date's morning cutoff and ends no later than the following evening. Sleep that began before the search start, or continues past the search end, is outside this run's coverage. An in-progress Nanit entry without an end time is held for a later check. Ambiguous or nonexistent local clock boundaries during a daylight-saving change fail with an error.
+Before importing, nanitberry compares each proposed interval with Huckleberry sleep for the same child. If even part of the proposed interval overlaps an existing entry, nanitberry skips the entire proposed interval; it does not shorten it to fit around the existing sleep. The rule applies to manual and previously synced sleep. Entries that only meet at the start or end time do not overlap. Nanitberry does not edit or delete existing entries, so if Nanit later changes a sleep record, review and correct Huckleberry manually.
 
-## Safety and status
+If nanitberry cannot read Huckleberry's sleep history, the run stops without writing. When writes are enabled, it checks history again immediately before each new entry.
 
-Before writing, nanitberry reads Huckleberry sleep history and skips any proposed interval that overlaps an existing entry, including a manual one. It reads again immediately before each write. A failed history read stops the run. The service does not edit or delete existing sleep; later Nanit corrections require manual review. One container instance should use a state volume at a time.
+## Daytime sleep tracking
 
-Use `docker compose run --rm nanitberry python sync.py status` to inspect the latest attempt, or `docker compose ps` for Docker health. The health check stays unhealthy until the first successful run, reports failed runs, and becomes stale after `HEALTH_MAX_AGE_HOURS`. A rejected Nanit refresh token requires another interactive `login`; temporary Nanit failures are reported separately. Rotated Nanit and Huckleberry tokens are saved under `/data` with mode `0600`.
+Daytime sync is off by default. Set `SYNC_DAYTIME=true` to include automatic Nanit sleep between the morning cutoff and the next night start. Manually logged Nanit naps are not imported. A sleep interval that crosses the night start is assigned to the night, so it is not also added as a daytime entry.
 
-Nanit and Huckleberry are unofficial APIs and can change. Authentication, MFA, baby lookup, and token refresh use `aionanit`; the Nanit `/babies/{uid}/calendar` request is isolated because `aionanit` 1.12.2 has no equivalent method. [ha-nanit issue #49](https://github.com/wealthystudent/ha-nanit/issues/49) reports both `auto_sleep` and manual `sleep` in calendar results. Validate sleep results on your own accounts before enabling routine writes.
+## Status and troubleshooting
 
-## Follow-up validation
+Use `docker compose logs nanitberry` to see scheduled runs and `docker compose run --rm nanitberry python sync.py status` to inspect the latest result. The container health check stays unhealthy until the first successful sync, and reports failed or stale syncs. If Nanit rejects its saved token, run the interactive `login` command again.
 
-- Inspect how manually logged Nanit naps appear on the account before considering them for optional daytime sync. Compare their type and timestamps with automatic naps and the Nanit app.
-- Decide whether optional daytime sync should include manual Nanit naps, then add a synthetic fixture for the confirmed response shape.
-- Verify MFA login, token refresh, a completed-night dry run, and Huckleberry interval reads and writes with each account before routine imports.
-- Review a historical backfill preview against existing manual Huckleberry entries before enabling writes.
+Use one running container with a given `./data` directory at a time. The saved tokens and status files live there.
 
-Never put passwords, MFA codes, tokens, or identifying account data in source files or test fixtures.
+## Development
+
+### Images
+
+The Compose example uses the published image at `ghcr.io/mjmeli/nanitberry:latest`. Pull it with `docker compose pull`. For a local build, run:
+
+```sh
+docker build -t nanitberry:local .
+docker compose -f compose.yaml -f compose.local.yaml up
+```
+
+The image workflow builds without publishing on pull requests. Branch pushes and version tags publish to GitHub Container Registry; Docker Hub is also updated when the repository's `DOCKERHUB_TOKEN` secret is configured. A private GHCR package must be authenticated before pulling.
 
 Licensed under [MIT](LICENSE).
