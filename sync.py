@@ -19,7 +19,7 @@ from huckleberry_api import HuckleberryAPI
 
 LOG = logging.getLogger("nanit_huckleberry_sync")
 API = "https://api.nanit.com"
-STATE = Path(os.getenv("STATE_DIR", "/data")) / "nanit_tokens.json"
+STATE = Path("/data/nanit_tokens.json")
 STATUS = STATE.with_name("sync_status.json")
 
 
