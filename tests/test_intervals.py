@@ -1,13 +1,20 @@
 """Sleep interval and time-window policy."""
 import types
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from tests.support import sync
 
 
 class IntervalsTests(unittest.TestCase):
+    def test_huckleberry_fractional_profile_hours(self):
+        self.assertEqual(sync.profile_clock(8.0, evening=True), time(20, 0))
+        self.assertEqual(sync.profile_clock(7.25), time(7, 15))
+        self.assertEqual(sync.profile_clock("20:30", evening=True), time(20, 30))
+        with self.assertRaises(ValueError):
+            sync.profile_clock(float("nan"), evening=True)
+
     def test_short_feed_bridged_long_wake_excluded(self):
         tz = ZoneInfo("America/New_York")
         start = datetime(2026, 9, 27, 20, tzinfo=tz)

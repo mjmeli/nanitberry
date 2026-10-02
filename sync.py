@@ -72,6 +72,8 @@ def failure_reason(exc):
         return "nanit_api_error", "Nanit request or token refresh failed; retry later"
     if str(exc).startswith("Nanit calendar"):
         return "nanit_api_error", str(exc)[:200]
+    if isinstance(exc, aiohttp.ClientResponseError) and "QUOTA_EXCEEDED" in str(exc):
+        return "huckleberry_auth_rate_limited", "Huckleberry password verification is rate limited; retry later"
     if isinstance(exc, aiohttp.ClientResponseError) and exc.status in (400, 401, 403):
         return "huckleberry_auth_rejected", "Check Huckleberry credentials in .env"
     message = str(exc)
@@ -134,11 +136,77 @@ def parse_clock(value):
     return clock(hour, minute)
 
 
+def profile_clock(value, evening=False):
+    """Parse Huckleberry's HH:MM or fractional-hour profile boundaries."""
+    if isinstance(value, bool):
+        raise ValueError("Huckleberry boundary must be a clock time")
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value) or not 0 <= value < 24:
+            raise ValueError("Huckleberry boundary must be between 0 and 24 hours")
+        total_minutes = round(value * 60)
+        if not 0 <= total_minutes < 24 * 60:
+            raise ValueError("Huckleberry boundary must be before 24:00")
+        result = clock(total_minutes // 60, total_minutes % 60)
+    else:
+        result = parse_clock(value)
+    # Huckleberry stores an evening value such as 8.0 for 8 p.m.
+    if evening and 1 <= result.hour < 12:
+        result = clock(result.hour + 12, result.minute)
+    return result
+
+
 def save_tokens(data):
     tokens = {key: data.get(key) for key in ("access_token", "refresh_token")}
     if not all(tokens.values()):
         raise RuntimeError("Nanit did not return access and refresh tokens")
     private_json(STATE, tokens)
+
+
+def huckleberry_token_path():
+    return STATE.with_name("huckleberry_tokens.json")
+
+
+def save_huckleberry_token(api):
+    if not api.refresh_token or not api.user_uid:
+        raise RuntimeError("Huckleberry did not return a refresh token and user UID")
+    private_json(huckleberry_token_path(), {
+        "email": api.email,
+        "refresh_token": api.refresh_token,
+        "user_uid": api.user_uid,
+    })
+
+
+async def authenticate_huckleberry(api):
+    """Reuse a saved Firebase refresh token across short-lived containers."""
+    refresh = getattr(api, "refresh_session_token", None)
+    if refresh is None:
+        # Synthetic API objects used by local tests do not manage tokens.
+        await api.authenticate()
+        return
+
+    async def refresh_and_save():
+        await refresh()
+        save_huckleberry_token(api)
+
+    api.refresh_session_token = refresh_and_save
+    try:
+        cached = json.loads(huckleberry_token_path().read_text())
+    except (OSError, ValueError):
+        cached = None
+    if (isinstance(cached, dict) and cached.get("email") == api.email
+            and isinstance(cached.get("refresh_token"), str) and cached["refresh_token"]
+            and isinstance(cached.get("user_uid"), str) and cached["user_uid"]):
+        api.refresh_token = cached["refresh_token"]
+        api.user_uid = cached["user_uid"]
+        try:
+            await api.refresh_session_token()
+            return
+        except aiohttp.ClientResponseError as exc:
+            if not any(code in str(exc) for code in ("INVALID_REFRESH_TOKEN", "TOKEN_EXPIRED")):
+                raise
+            LOG.warning("Saved Huckleberry refresh token was rejected; trying password login")
+    await api.authenticate()
+    save_huckleberry_token(api)
 
 
 async def nanit_login():
@@ -168,7 +236,7 @@ async def huckleberry_children():
             timezone=setting("TZ", "America/New_York"),
             websession=session,
         )
-        await api.authenticate()
+        await authenticate_huckleberry(api)
         user = await api.get_user()
         if user is None:
             raise RuntimeError("Huckleberry user profile was not found")
@@ -266,7 +334,7 @@ async def log_missing_uids():
                                  password=os.environ["HUCKLEBERRY_PASSWORD"],
                                  timezone=setting("TZ", "America/New_York"),
                                  websession=session)
-            await asyncio.wait_for(api.authenticate(), timeout=30)
+            await asyncio.wait_for(authenticate_huckleberry(api), timeout=30)
             await asyncio.wait_for(huckleberry_uid_from_account(api), timeout=30)
         except Exception as exc:
             LOG.warning("Huckleberry UID discovery: %s", discovery_message(exc))
@@ -362,6 +430,25 @@ def normalize(entries, start, end, max_gap_seconds):
     return [(datetime.fromtimestamp(a, start.tzinfo), datetime.fromtimestamp(b, start.tzinfo)) for a, b in merged]
 
 
+def completed_calendar_entries(entries, now_ts):
+    """Leave a recent auto_sleep without an end for the next poll."""
+    completed = []
+    for entry in entries:
+        if (isinstance(entry, dict) and entry.get("type") == "auto_sleep"
+                and entry.get("end_ts") is None):
+            try:
+                begin = float(entry["begin_ts"])
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("Nanit auto_sleep has invalid timestamps") from exc
+            if not math.isfinite(begin) or not now_ts - 36 * 3600 <= begin <= now_ts:
+                raise ValueError("Nanit auto_sleep has invalid timestamps")
+            LOG.info("Nanit auto_sleep beginning %s is still in progress",
+                     datetime.fromtimestamp(begin, timezone.utc))
+            continue
+        completed.append(entry)
+    return completed
+
+
 def overlap(first, second):
     # Python compares wall times for two datetimes with the same ZoneInfo,
     # which gives the wrong result in the repeated hour at fall DST change.
@@ -430,12 +517,15 @@ def backfill_dates(latest_day, days):
 
 
 async def backfill(latest_day, days):
-    for day in backfill_dates(latest_day, days):
-        LOG.info("Backfill: processing night starting %s", day)
-        await sync_day(day)
+    dates = backfill_dates(latest_day, days)
+    async with aiohttp.ClientSession() as websession:
+        context = {"session": websession}
+        for day in dates:
+            LOG.info("Backfill: processing night starting %s", day)
+            await sync_day(day, context)
 
 
-async def sync_day(day):
+async def sync_day(day, context=None, skip_incomplete=False):
     """Serialize local runs to prevent a scheduled run racing a manual backfill."""
     STATE.parent.mkdir(parents=True, exist_ok=True)
     with (STATE.parent / "sync.lock").open("a+") as lock:
@@ -445,92 +535,137 @@ async def sync_day(day):
             raise RuntimeError("Another sync is running against this data directory") from exc
         status_update("running", "sync_in_progress", last_attempt=utc_now(), night=day.isoformat())
         try:
-            await _sync_day(day)
+            processed = await _sync_day(day, context, skip_incomplete)
         except Exception as exc:
             reason, detail = failure_reason(exc)
             status_update("error", reason, detail)
             raise
+        if not processed:
+            status_update("waiting", "window_incomplete", "Waiting for the morning cutoff")
+            return False
         status_update("ok", "sync_succeeded", last_success=utc_now())
+        return True
 
 
-async def _sync_day(day):
-    tz = ZoneInfo(setting("TZ", "America/New_York"))
-    gap = int(setting("MAX_NIGHT_WAKE_MINUTES", "20"))
-    if not 0 <= gap <= 180:
-        raise ValueError("MAX_NIGHT_WAKE_MINUTES must be between 0 and 180")
-    day_gap = int(setting("MAX_DAY_WAKE_MINUTES", "0"))
-    if not 0 <= day_gap <= 180:
-        raise ValueError("MAX_DAY_WAKE_MINUTES must be between 0 and 180")
-    write = boolean("WRITE_ENABLED")
-    include_day = boolean("SYNC_DAYTIME")
+async def _sync_day(day, context=None, skip_incomplete=False):
+    if context is None:
+        async with aiohttp.ClientSession() as websession:
+            return await _sync_day(day, {"session": websession}, skip_incomplete)
+    if "clients" not in context:
+        context["clients"] = await prepare_clients(context["session"])
+    nanit, api, pairs = context["clients"]
+    return await _sync_day_with_clients(day, nanit, api, pairs, skip_incomplete)
+
+
+async def prepare_clients(websession):
     pairs = configured_uid_pairs()
     mapped = pairs is not None
-    async with aiohttp.ClientSession() as websession:
-        if pairs is None:
-            nanit_uid = await nanit_uid_from_account(websession)
-        api = HuckleberryAPI(email=os.environ["HUCKLEBERRY_EMAIL"],
-                             password=os.environ["HUCKLEBERRY_PASSWORD"],
-                             timezone=str(tz), websession=websession)
-        await api.authenticate()
-        if pairs is None:
-            huckleberry_uid = await huckleberry_uid_from_account(api)
-            pairs = [(nanit_uid, huckleberry_uid)]
-        nanit = restore_nanit(websession)
-        if mapped:
-            await validate_uid_pairs(nanit, api, pairs)
-        for nanit_uid, huckleberry_uid in pairs:
-            LOG.info("Syncing Nanit %s to Huckleberry %s", nanit_uid, huckleberry_uid)
+    if pairs is None:
+        nanit_uid = await nanit_uid_from_account(websession)
+    api = HuckleberryAPI(email=os.environ["HUCKLEBERRY_EMAIL"],
+                         password=os.environ["HUCKLEBERRY_PASSWORD"],
+                         timezone=setting("TZ", "America/New_York"), websession=websession)
+    await authenticate_huckleberry(api)
+    if pairs is None:
+        huckleberry_uid = await huckleberry_uid_from_account(api)
+        pairs = [(nanit_uid, huckleberry_uid)]
+    nanit = restore_nanit(websession)
+    if mapped:
+        await validate_uid_pairs(nanit, api, pairs)
+    return nanit, api, pairs
+
+
+async def _sync_day_with_clients(day, nanit, api, pairs, skip_incomplete=False, now=None):
+    tz = ZoneInfo(setting("TZ", "America/New_York"))
+    gap = int(setting("MAX_WAKE_MINUTES", "20"))
+    if not 0 <= gap <= 180:
+        raise ValueError("MAX_WAKE_MINUTES must be between 0 and 180")
+    write = boolean("WRITE_ENABLED")
+    include_day = boolean("SYNC_DAYTIME")
+    all_ready = True
+    for nanit_uid, huckleberry_uid in pairs:
+        LOG.info("Syncing Nanit %s to Huckleberry %s", nanit_uid, huckleberry_uid)
+        if boolean("USE_HUCKLEBERRY_HOURS", True):
+            child = await api.get_child(huckleberry_uid)
+            if child is None or child.nightStart is None or child.morningCutoff is None:
+                raise RuntimeError("Huckleberry nightStart/morningCutoff unavailable; configure explicit hours")
+            night_start = profile_clock(child.nightStart, evening=True)
+            morning_cutoff = profile_clock(child.morningCutoff)
+        else:
             night_start = parse_clock(setting("NIGHT_START", "18:00"))
             morning_cutoff = parse_clock(setting("MORNING_CUTOFF", "10:00"))
-            if boolean("USE_HUCKLEBERRY_HOURS"):
-                child = await api.get_child(huckleberry_uid)
-                if child is None or child.nightStart is None or child.morningCutoff is None:
-                    raise RuntimeError("Huckleberry nightStart/morningCutoff unavailable; configure explicit hours")
-                night_start = parse_clock(child.nightStart)
-                morning_cutoff = parse_clock(child.morningCutoff)
-            ranges = windows(day, tz, night_start, morning_cutoff, include_day)
-            fetch_start = ranges[0][1]
-            fetch_end = ranges[-1][2]
-            if fetch_end.timestamp() > datetime.now(timezone.utc).timestamp() - 30 * 60:
-                raise RuntimeError("Window is not complete; schedule after morning cutoff plus 30 minutes")
-            calendar = await calendar_sleep(nanit, nanit_uid, fetch_start, fetch_end)
-            # This strict read propagates failures. The library's list_sleep_intervals
-            # catches some Firestore errors and otherwise returns an unsafe empty list.
-            existing = [existing_range(x) for x in await strict_sleep_intervals(
-                api, huckleberry_uid, fetch_start, fetch_end)]
-            for kind, start, end in ranges:
-                spans = normalize(calendar, start, end, (gap if kind == "night" else day_gap) * 60)
-                LOG.info("%s %s: %d Nanit interval(s)", day, kind, len(spans))
-                for span in spans:
-                    if any(overlap(span, old) for old in existing):
-                        LOG.warning("Skipping %s–%s: overlaps existing Huckleberry sleep", *span)
+        ranges = windows(day, tz, night_start, morning_cutoff, include_day)
+        evening = ranges[-1][1]
+        morning = ranges[-1][2]
+        next_evening = local_boundary(day + timedelta(days=1), night_start, tz)
+        now_ts = (now or datetime.now(timezone.utc)).timestamp()
+        if morning.timestamp() > now_ts:
+            if skip_incomplete:
+                LOG.info("Night starting %s is not ready for %s", day, huckleberry_uid)
+                all_ready = False
+                continue
+            raise RuntimeError("Window is not complete; retry after morning cutoff")
+        # Ask for the preceding day even in night-only mode. A sleep that began
+        # before night_start may run into the night and must retain its real start.
+        day_start = local_boundary(day, morning_cutoff, tz)
+        fetch_start = day_start
+        fetch_end = datetime.fromtimestamp(min(next_evening.timestamp(), now_ts), tz)
+        calendar = completed_calendar_entries(
+            await calendar_sleep(nanit, nanit_uid, fetch_start, fetch_end), now_ts)
+        # This strict read propagates failures. The library's list_sleep_intervals
+        # catches some Firestore errors and otherwise returns an unsafe empty list.
+        existing = [existing_range(x) for x in await strict_sleep_intervals(
+            api, huckleberry_uid, fetch_start, fetch_end)]
+        spans = normalize(calendar, fetch_start, fetch_end, gap * 60)
+        spans_by_kind = []
+        if include_day:
+            # A span crossing the evening boundary belongs wholly to the night.
+            day_spans = [span for span in spans
+                         if span[1].timestamp() <= evening.timestamp()]
+            spans_by_kind.append(("day", day_spans))
+        night_spans = [span for span in spans
+                       if span[0].timestamp() < morning.timestamp()
+                       and span[1].timestamp() > evening.timestamp()]
+        # A short wake may join the last segment. Keep that segment pending until
+        # its wake-gap window has passed, while importing earlier completed sleep.
+        ready_end_ts = now_ts - gap * 60
+        night_spans = [span for span in night_spans
+                       if span[1].timestamp() <= ready_end_ts
+                       and span[1].timestamp() < fetch_end.timestamp()]
+        spans_by_kind.append(("night", night_spans))
+        for kind, spans in spans_by_kind:
+            LOG.info("%s %s: %d Nanit interval(s)", day, kind, len(spans))
+            for span in spans:
+                if any(overlap(span, old) for old in existing):
+                    LOG.warning("Skipping %s–%s: overlaps existing Huckleberry sleep", *span)
+                    continue
+                LOG.info("%s %s–%s (%s)", "WRITE" if write else "DRY RUN", *span, kind)
+                if write:
+                    # Re-read immediately before writing in case the app changed mid-run.
+                    current = [existing_range(x) for x in await strict_sleep_intervals(
+                        api, huckleberry_uid, span[0], span[1])]
+                    if any(overlap(span, old) for old in current):
+                        LOG.warning("Skipping %s–%s: Huckleberry changed during sync", *span)
                         continue
-                    LOG.info("%s %s–%s (%s)", "WRITE" if write else "DRY RUN", *span, kind)
-                    if write:
-                        # Re-read immediately before writing in case the app changed mid-run.
-                        current = [existing_range(x) for x in await strict_sleep_intervals(
-                            api, huckleberry_uid, span[0], span[1])]
-                        if any(overlap(span, old) for old in current):
-                            LOG.warning("Skipping %s–%s: Huckleberry changed during sync", *span)
-                            continue
-                        await api.log_sleep(huckleberry_uid, start_time=span[0], end_time=span[1])
-                        existing.append(span)
+                    await api.log_sleep(huckleberry_uid, start_time=span[0], end_time=span[1])
+                    existing.append(span)
+    return all_ready
 
 
 async def scheduled():
     tz = ZoneInfo(setting("TZ", "America/New_York"))
-    run_at = parse_clock(setting("RUN_AT", "11:00"))
-    while True:
-        now = datetime.now(tz)
-        target = local_boundary(now.date(), run_at, tz)
-        if target <= now:
-            target = local_boundary(now.date() + timedelta(days=1), run_at, tz)
-        LOG.info("Next sync at %s", target)
-        await asyncio.sleep(max(1, target.timestamp() - datetime.now(timezone.utc).timestamp()))
-        try:
-            await sync_day(datetime.now(tz).date() - timedelta(days=1))
-        except Exception:
-            LOG.exception("Scheduled sync failed; will retry on next run")
+    async with aiohttp.ClientSession() as websession:
+        context = {"session": websession}
+        while True:
+            now_ts = datetime.now(timezone.utc).timestamp()
+            next_tick = (int(now_ts) // (15 * 60) + 1) * (15 * 60)
+            LOG.info("Next sync check at %s", datetime.fromtimestamp(next_tick, tz))
+            await asyncio.sleep(max(1, next_tick - now_ts))
+            try:
+                await sync_day(datetime.now(tz).date() - timedelta(days=1),
+                               context, skip_incomplete=True)
+            except Exception:
+                LOG.exception("Scheduled sync failed; will retry in 15 minutes")
 
 
 def main():

@@ -1,12 +1,15 @@
 """Huckleberry history reads, child lookup, and duplicate protection."""
 import asyncio
+import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from io import StringIO
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -14,6 +17,43 @@ from tests.support import sync
 
 
 class HuckleberryTests(unittest.TestCase):
+    def test_refresh_token_survives_new_client_and_rotation(self):
+        class API:
+            password_logins = 0
+            refreshes = 0
+            email = "test@example.invalid"
+            refresh_token = None
+            user_uid = None
+
+            async def authenticate(self):
+                API.password_logins += 1
+                self.refresh_token = "refresh-1"
+                self.user_uid = "user-1"
+
+            async def refresh_session_token(self):
+                API.refreshes += 1
+                self.refresh_token = f"refresh-{API.refreshes + 1}"
+
+        original_state = sync.STATE
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                sync.STATE = Path(tmp) / "nanit_tokens.json"
+                asyncio.run(sync.authenticate_huckleberry(API()))
+                path = sync.huckleberry_token_path()
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads(path.read_text())["refresh_token"], "refresh-1")
+
+                restarted = API()
+                asyncio.run(sync.authenticate_huckleberry(restarted))
+                self.assertEqual(API.password_logins, 1)
+                self.assertEqual(API.refreshes, 1)
+                self.assertEqual(json.loads(path.read_text())["refresh_token"], "refresh-2")
+
+                asyncio.run(restarted.refresh_session_token())
+                self.assertEqual(json.loads(path.read_text())["refresh_token"], "refresh-3")
+        finally:
+            sync.STATE = original_state
+
     def test_failed_history_read_stops_sync(self):
         google = types.ModuleType("google")
         cloud = types.ModuleType("google.cloud")
@@ -154,7 +194,8 @@ class HuckleberryTests(unittest.TestCase):
         async def history(*_): return [old]
         env = {"TZ": "America/New_York", "CHILD_UID_MAP": '{"baby":"child"}',
                "HUCKLEBERRY_EMAIL": "test@example.invalid",
-               "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "true"}
+               "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "true",
+               "USE_HUCKLEBERRY_HOURS": "false"}
         with patch.dict(os.environ, env), patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
              patch.object(sync, "HuckleberryAPI", API), patch.object(sync, "restore_nanit", lambda _: object()), \
              patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \

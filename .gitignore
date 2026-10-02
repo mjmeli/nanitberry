@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 nanit_tokens.json
+huckleberry_tokens.json
 sync_status.json
 sync.lock
 data/

@@ -1,6 +1,6 @@
 services:
   nanitberry:
-    image: ${NANITBERRY_IMAGE:-ghcr.io/mjmeli/nanitberry:latest}
+    image: ghcr.io/mjmeli/nanitberry:latest
     restart: unless-stopped
     env_file: .env
     volumes:
