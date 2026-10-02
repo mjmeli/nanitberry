@@ -18,6 +18,5 @@ services:
       MAX_WAKE_MINUTES: "${MAX_WAKE_MINUTES:-20}"
       SYNC_DAYTIME: "${SYNC_DAYTIME:-false}"
       WRITE_ENABLED: "${WRITE_ENABLED:-false}"
-      STATE_DIR: "${STATE_DIR:-/data}"
     volumes:
       - ./data:/data

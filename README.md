@@ -71,7 +71,6 @@ Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled 
 | `WRITE_ENABLED` | `false` | Enable Huckleberry writes |
 | `BACKFILL_DAYS` | `7` | Number of completed nights for an explicit `backfill` (1–365) |
 | `HEALTH_MAX_AGE_HOURS` | `36` | Mark sync unhealthy when the last success is too old |
-| `STATE_DIR` | `/data` | Container directory for tokens, status, and the local lock |
 
 ## How night sleep is defined
 
