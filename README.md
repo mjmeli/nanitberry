@@ -1,10 +1,20 @@
 # nanitberry
 
-Nanitberry copies completed automatic sleep from Nanit to Huckleberry. It runs on a schedule and can combine sleep segments separated by a short wake. It starts in **dry-run, night-only mode**; it never writes to Huckleberry until you enable writes.
+Parents who use Nanit for sleep monitoring and Huckleberry for sleep tracking otherwise have to enter the same sleep in both apps. Nanitberry automates that handoff by checking Nanit's sleep data and preparing matching entries in Huckleberry.
+
+Nanitberry can:
+
+- Check for completed sleep every 15 minutes and sync overnight sleep automatically.
+- Use each child's Huckleberry night schedule to distinguish night from daytime sleep, or use times you configure.
+- Join Nanit sleep segments separated by a short wake. The default gap is 20 minutes; longer wakes remain separate.
+- Optionally sync automatic daytime sleep. Manually logged Nanit naps are not imported.
+- Preview proposed entries before writing. It starts in **dry-run, night-only mode** and skips any entry that overlaps existing Huckleberry sleep.
+
+Review a preview against an existing night before enabling writes. Nanitberry never writes to Huckleberry until you opt in.
 
 ## Quick start with Docker Compose
 
-1. Copy `.env.example` to `.env` and add your Nanit and Huckleberry email addresses and passwords. Keep `.env` private.
+1. If you wish to use the `.env` file configuration, copy `.env.example` to `.env` and add your Nanit and Huckleberry email addresses and passwords. Keep `.env` private. Alternatively, you may provide the environment variables via the docker compose or run command directly.
 
 2. Pull the image and complete Nanit's interactive MFA login:
 
@@ -13,14 +23,14 @@ Nanitberry copies completed automatic sleep from Nanit to Huckleberry. It runs o
    docker compose run --rm -it nanitberry python sync.py login
    ```
 
-   If your infrastructure cannot run an interactive `docker compose run`, start the service and run the login command in its container instead:
+   You may also start the service and run the login command in its container instead:
 
    ```sh
    docker compose up -d
    docker compose exec nanitberry python sync.py login
    ```
 
-3. If either account has more than one child, map the Nanit and Huckleberry child IDs as described under [Child selection](#child-selection). With one child in each account, nanitberry selects them automatically.
+3. If Nanit and Huckleberry each have one child in each account, nanitberry selects them automatically. If either account has more than one child, map the Nanit and Huckleberry child IDs as described under [Child selection](#child-selection).
 
 4. Preview a completed night with writes still disabled:
 
@@ -28,7 +38,7 @@ Nanitberry copies completed automatic sleep from Nanit to Huckleberry. It runs o
    docker compose run --rm nanitberry python sync.py once --date YYYY-MM-DD
    ```
 
-   Use the date the night began. Omit `--date` to preview the previous night. Check the proposed sleep times in both apps before enabling writes.
+   Use the date the night began. Omit `--date` to preview the previous night. Check the proposed sleep times in both apps before enabling writes. You may also execute this command by attaching to the container.
 
 5. When the preview looks right, set `WRITE_ENABLED: "true"` in `compose.yaml`. To import earlier nights, run an explicit backfill; then start or restart the service:
 
@@ -65,7 +75,7 @@ When both accounts have exactly one child, nanitberry selects that pair automati
 {"nanit-uid-1":"huckleberry-uid-1","nanit-uid-2":"huckleberry-uid-2"}
 ```
 
-To find the IDs, run:
+When you first launch nanitberry, it will log the detected child IDs for you to retrieve. Alternatively, you can find the IDs directly by running:
 
 ```sh
 docker compose run --rm nanitberry python sync.py babies
@@ -88,9 +98,22 @@ Before importing, nanitberry compares each proposed interval with Huckleberry sl
 
 If nanitberry cannot read Huckleberry's sleep history, the run stops without writing. When writes are enabled, it checks history again immediately before each new entry.
 
-## Daytime sleep tracking
+## Daytime vs. nighttime sleep
 
 Daytime sync is off by default. Set `SYNC_DAYTIME=true` to include automatic Nanit sleep between the morning cutoff and the next night start. Manually logged Nanit naps are not imported. A sleep interval that crosses the night start is assigned to the night, so it is not also added as a daytime entry.
+
+The examples below use an 8 p.m. to 7 a.m. night window. Nanitberry keeps the full sleep interval when classifying it; it does not trim sleep to the window. Daytime intervals are included only when `SYNC_DAYTIME=true`.
+
+| Nanit sleep | Classification | Interval sent to Huckleberry |
+| --- | --- | --- |
+| 7:45 p.m.–7:20 a.m. | Night; crosses both boundaries | 7:45 p.m.–7:20 a.m. |
+| 7:45 p.m.–10:00 p.m. | Night; overlaps the night window | 7:45 p.m.–10:00 p.m. |
+| 11:00 p.m.–7:20 a.m. | Night; ends after the morning cutoff | 11:00 p.m.–7:20 a.m. |
+| 11:00 p.m.–6:00 a.m. | Night; inside the window | 11:00 p.m.–6:00 a.m. |
+| 7:00 p.m.–7:45 p.m. | Daytime; ends before night starts | Only with daytime sync enabled |
+| 7:15 a.m.–8:00 a.m. | Daytime; starts after the morning cutoff | Only with daytime sync enabled |
+
+An interval ending exactly at 8 p.m. is daytime; one starting exactly at 7 a.m. is daytime. A post-cutoff segment can still be part of a night interval when it joins a pre-cutoff segment within `MAX_WAKE_MINUTES`.
 
 ## Status and troubleshooting
 
