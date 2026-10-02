@@ -8,7 +8,7 @@ The default is **night-only, dry-run**. Daytime sync is optional, and writes req
 
 [compose.yaml](compose.yaml) is an example deployment. It lists all service settings, pulls the published GHCR image, and stores tokens and sync status in `./data`. Other Docker setups only need the same environment variables and a persistent, writable `/data` mount. [compose.local.yaml](compose.local.yaml) is an optional image override for local builds; it is not needed when using the published image.
 
-1. Provide `NANIT_EMAIL`, `NANIT_PASSWORD`, `HUCKLEBERRY_EMAIL`, and `HUCKLEBERRY_PASSWORD` as environment variables to Docker Compose. You can export them in your shell or optionally copy `.env.example` to `.env` and fill them in. Compose substitutes these four values into the service; it fails early if one is missing. Adjust `TZ` and any other settings directly in `compose.yaml`, and replace `./data` with a writable host path if needed. Keep credentials out of the committed Compose file.
+1. Copy `.env.example` to `.env` and set both account credentials, or provide the variables through your shell environment. All settings are listed in both files; Compose substitutes values from `.env` or the shell into `compose.yaml`, using the listed defaults when optional values are absent. It fails early if a credential is missing. The commented `env_file` line is optional: uncomment it to also pass variables from `.env` directly into the container. Entries under `environment` take precedence. Replace `./data` with a writable host path if needed. Keep credentials out of the committed Compose file.
 2. Pull the image and complete Nanit's interactive MFA login:
 
    ```sh
@@ -58,7 +58,7 @@ Required for sync: `HUCKLEBERRY_EMAIL`, `HUCKLEBERRY_PASSWORD`, and a saved Nani
 CHILD_UID_MAP: '{"nanit-uid-1":"huckleberry-uid-1","nanit-uid-2":"huckleberry-uid-2"}'
 ```
 
-Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled run, preview, and backfill processes all mapped pairs in order. Preview all pairs before enabling writes; if a later pair fails after an earlier pair was written, rerunning is safe because existing Huckleberry intervals are checked again. Set `CHILD_UID_MAP` in `compose.yaml` when needed; values in `.env` do not override settings listed directly in the Compose file. `NANIT_EMAIL` and `NANIT_PASSWORD` are needed for interactive login; scheduled runs use the saved token pair. Keep any `.env` file private. Container logs contain child names and UIDs during discovery.
+Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled run, preview, and backfill processes all mapped pairs in order. Preview all pairs before enabling writes; if a later pair fails after an earlier pair was written, rerunning is safe because existing Huckleberry intervals are checked again. Set `CHILD_UID_MAP` in `.env`, your shell environment, or directly in `compose.yaml` when needed. `NANIT_EMAIL` and `NANIT_PASSWORD` are needed for interactive login; scheduled runs use the saved token pair. Keep any `.env` file private. Container logs contain child names and UIDs during discovery.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
