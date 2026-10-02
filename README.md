@@ -4,11 +4,11 @@ Parents who use Nanit for sleep monitoring and Huckleberry for sleep tracking ot
 
 Nanitberry can:
 
-- Check for completed sleep every 15 minutes and sync overnight sleep automatically.
-- Use each child's Huckleberry night schedule to distinguish night from daytime sleep, or use times you configure.
-- Join Nanit sleep segments separated by a short wake. The default gap is 20 minutes; longer wakes remain separate.
-- Optionally sync automatic daytime sleep. Manually logged Nanit naps are not imported.
-- Preview proposed entries before writing. It starts in **dry-run, night-only mode** and skips any entry that overlaps existing Huckleberry sleep.
+- **Automatic overnight sync:** Check for completed sleep every 15 minutes and sync it to Huckleberry.
+- **Night schedule matching:** Use each child's Huckleberry night schedule to distinguish night from daytime sleep, or use times you configure.
+- **Short wake handling:** Join Nanit sleep segments separated by a short wake. The default gap is 20 minutes; longer wakes remain separate.
+- **Optional daytime sync:** Include automatic daytime sleep when enabled. Manually logged Nanit naps are not imported.
+- **Safe preview:** Review proposed entries before writing. Nanitberry starts in **dry-run, night-only mode** and skips any entry that overlaps existing Huckleberry sleep.
 
 Review a preview against an existing night before enabling writes. Nanitberry never writes to Huckleberry until you opt in.
 
