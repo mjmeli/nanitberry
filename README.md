@@ -73,7 +73,24 @@ Each Nanit and Huckleberry UID can appear only once in the map. Every scheduled 
 | `HEALTH_MAX_AGE_HOURS` | `36` | Mark sync unhealthy when the last success is too old |
 | `STATE_DIR` | `/data` | Container directory for tokens, status, and the local lock |
 
-A gap bridged by the threshold appears as continuous logged sleep, including the wake minutes. A longer gap remains unlogged. Huckleberry profile boundaries can be `HH:MM` or fractional hours (for example, night start `8.0` means 8 p.m. and morning cutoff `7.25` means 7:15 a.m.). A sleep that begins before night start and continues into the night keeps its actual start time and is treated as night sleep, even with `SYNC_DAYTIME=false`. A sleep that begins before the morning cutoff can continue past it; a new sleep that starts after the cutoff is not treated as night sleep. The next evening bounds the search. An in-progress Nanit entry without an end time is held for a later check. Ambiguous or nonexistent local clock boundaries during a daylight-saving change fail with an error.
+## How night sleep is defined
+
+By default, each child's Huckleberry profile supplies the night start and morning cutoff. Its values may be `HH:MM` or fractional hours: night start `8.0` means 8 p.m., and morning cutoff `7.25` means 7:15 a.m. With those settings, the night window for an evening date runs from **8:00 p.m. to 7:15 a.m. the next day**.
+
+Nanitberry joins automatic Nanit sleep segments separated by at most `MAX_WAKE_MINUTES` (20 by default). A resulting interval belongs to that night if it **ends after 8:00 p.m. and begins before 7:15 a.m.** The boundaries decide which night owns the interval; they do not trim its start or end. For example:
+
+| Nanit sleep | Night sleep? | Interval sent to Huckleberry |
+| --- | --- | --- |
+| 7:45 p.m.–7:30 a.m. | Yes; crosses both boundaries | 7:45 p.m.–7:30 a.m. |
+| 7:45 p.m.–10:00 p.m. | Yes; starts before night start | 7:45 p.m.–10:00 p.m. |
+| 11:00 p.m.–7:30 a.m. | Yes; ends after morning cutoff | 11:00 p.m.–7:30 a.m. |
+| 11:00 p.m.–6:00 a.m. | Yes; entirely inside the window | 11:00 p.m.–6:00 a.m. |
+| 7:00 p.m.–7:45 p.m. | No; ends before night start | None in night-only mode |
+| 7:30 a.m.–8:00 a.m. | No; starts after morning cutoff | None in night-only mode |
+
+Ending exactly at 8:00 p.m. does not overlap the night; starting exactly at 7:15 a.m. belongs to daytime. A post-cutoff segment *can* be part of night sleep when it follows a pre-cutoff segment within the wake-gap threshold. In that case the joined interval, including the wake minutes, is logged as one night entry. A longer gap leaves separate intervals, and a new post-cutoff interval is not night sleep. `SYNC_DAYTIME=true` also considers daytime intervals; one that crosses night start is assigned to night only once.
+
+For each night, the Nanit calendar search starts at that evening date's morning cutoff and ends no later than the following evening. Sleep that began before the search start, or continues past the search end, is outside this run's coverage. An in-progress Nanit entry without an end time is held for a later check. Ambiguous or nonexistent local clock boundaries during a daylight-saving change fail with an error.
 
 ## Safety and status
 
