@@ -140,7 +140,7 @@ An interval may be imported up to 15 minutes after becoming eligible, or later i
 
 ### Scheduler and lookback
 
-The service checks at :00, :15, :30, and :45 throughout the day and night. On startup, it waits for the next scheduled check. Each check processes the previous calendar date followed by the current date, using the configured `TZ`. Each date covers daytime sleep before that evening and the night beginning that evening, including sleep continuing past the next morning cutoff.
+The service checks immediately on startup, then at :00, :15, :30, and :45 throughout the day and night. Each check processes the previous calendar date followed by the current date, using the configured `TZ`. Each date covers daytime sleep before that evening and the night beginning that evening, including sleep continuing past the next morning cutoff.
 
 | Check time | Why both dates are checked |
 | --- | --- |

@@ -133,7 +133,7 @@ class LiveSyncTests(unittest.TestCase):
         self.poll(2, self.at(2, 8, 30))
         self.assertEqual(self.writes, [first, second])
 
-    def test_scheduler_checks_previous_and_current_dates_on_each_tick(self):
+    def test_scheduler_checks_on_startup_then_waits_for_quarter_hour(self):
         class Session:
             async def __aenter__(self): return self
             async def __aexit__(self, *_): pass
@@ -142,13 +142,45 @@ class LiveSyncTests(unittest.TestCase):
             pass
 
         run = AsyncMock()
+        waits = []
+        async def wait(delay):
+            waits.append(delay)
+            if len(waits) == 1:
+                # Startup must have processed both dates before the first wait.
+                self.assertEqual(run.await_count, 2)
+                self.assertEqual(delay, 600)
+            else:
+                raise StopScheduler
+
         with patch.dict(os.environ, self.env), \
              patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
              patch.object(sync, "datetime", wraps=datetime) as clock, \
              patch.object(sync, "sync_day", run), \
-             patch.object(sync.asyncio, "sleep", AsyncMock(side_effect=[None, StopScheduler])):
-            clock.now.return_value = self.at(2, 1, 30)
+             patch.object(sync.asyncio, "sleep", wait):
+            clock.now.return_value = self.at(2, 1, 35)
             with self.assertRaises(StopScheduler):
                 asyncio.run(sync.scheduled())
         self.assertEqual([call.args[0] for call in run.await_args_list],
-                         [date(2026, 10, 1), date(2026, 10, 2)])
+                         [date(2026, 10, 1), date(2026, 10, 2)] * 2)
+
+    def test_scheduler_retries_failed_startup_at_next_tick(self):
+        class Session:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): pass
+
+        class StopScheduler(Exception):
+            pass
+
+        run = AsyncMock(side_effect=[RuntimeError("startup failed"), None, None])
+        with patch.dict(os.environ, self.env), \
+             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(sync, "datetime", wraps=datetime) as clock, \
+             patch.object(sync, "sync_day", run), \
+             patch.object(sync.asyncio, "sleep", AsyncMock(side_effect=[None, StopScheduler])), \
+             self.assertLogs(sync.LOG, level="ERROR") as captured:
+            clock.now.return_value = self.at(2, 1, 35)
+            with self.assertRaises(StopScheduler):
+                asyncio.run(sync.scheduled())
+        self.assertEqual([call.args[0] for call in run.await_args_list],
+                         [date(2026, 10, 1), date(2026, 10, 1), date(2026, 10, 2)])
+        self.assertIn("will retry at the next scheduled check", captured.output[0])
