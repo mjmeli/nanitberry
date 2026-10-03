@@ -6,4 +6,5 @@ nanit_tokens.json
 huckleberry_tokens.json
 sync_status.json
 sync.lock
+sleep_ownership.json
 data/

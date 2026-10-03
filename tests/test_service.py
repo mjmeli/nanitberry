@@ -10,10 +10,15 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync
+from tests.support import sync, SyntheticOwnership
 
 
 class ServiceTests(unittest.TestCase):
+    def setUp(self):
+        ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        ownership_patch.start()
+        self.addCleanup(ownership_patch.stop)
+
     def test_profile_hours_include_late_night_continuation_but_not_next_nap(self):
         tz = ZoneInfo("America/New_York")
         evening = datetime(2020, 9, 27, 20, tzinfo=tz)
@@ -144,48 +149,37 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(asyncio.run(sync._sync_day_with_clients(
                 day, object(), api, [("baby", "child")],
                 now=morning + timedelta(minutes=30))))
-            self.assertEqual(len(api.writes), 1)
+            self.assertEqual(len(api.writes), 2)
             self.assertTrue(asyncio.run(sync._sync_day_with_clients(
                 day, object(), api, [("baby", "child")],
                 now=morning + timedelta(minutes=45))))
             self.assertEqual(len(api.writes), 2)
             self.assertEqual(api.writes[-1][1]["end_time"], morning + timedelta(minutes=13))
 
-    def test_short_wake_at_cutoff_is_held_until_merge_window_closes(self):
+    def test_sleep_ending_before_cutoff_imports_without_waiting(self):
         tz = ZoneInfo("America/New_York")
         morning = datetime(2026, 10, 2, 7, 15, tzinfo=tz)
         start = morning - timedelta(hours=2)
-        first = {"type": "auto_sleep", "begin_ts": start.timestamp(),
-                 "end_ts": (morning - timedelta(minutes=10)).timestamp()}
-        second = {"type": "auto_sleep",
-                  "begin_ts": (morning + timedelta(minutes=5)).timestamp(),
-                  "end_ts": (morning + timedelta(minutes=40)).timestamp()}
+        end = morning - timedelta(minutes=10)
+        entries = [{"type": "auto_sleep", "begin_ts": start.timestamp(),
+                    "end_ts": end.timestamp()}]
         class API:
             writes = []
             async def get_child(self, uid):
                 return types.SimpleNamespace(nightStart=8.0, morningCutoff=7.25)
             async def log_sleep(self, *args, **kwargs):
                 self.writes.append((args, kwargs))
-
         api = API()
-        entries = [first]
         async def calendar(*_): return entries
         async def history(*_): return []
         env = {"TZ": "America/New_York", "USE_HUCKLEBERRY_HOURS": "true",
                "MAX_WAKE_MINUTES": "20", "SYNC_DAYTIME": "false", "WRITE_ENABLED": "true"}
-        with patch.dict(os.environ, env), \
-             patch.object(sync, "calendar_sleep", calendar), \
+        with patch.dict(os.environ, env), patch.object(sync, "calendar_sleep", calendar), \
              patch.object(sync, "strict_sleep_intervals", history):
             asyncio.run(sync._sync_day_with_clients(
                 date(2026, 10, 1), object(), api, [("baby", "child")], now=morning))
-            self.assertEqual(api.writes, [])
-            entries = [first, second]
-            asyncio.run(sync._sync_day_with_clients(
-                date(2026, 10, 1), object(), api, [("baby", "child")],
-                now=morning + timedelta(minutes=75)))
-            self.assertEqual(len(api.writes), 1)
-            self.assertEqual(api.writes[0][1]["start_time"], start)
-            self.assertEqual(api.writes[0][1]["end_time"], morning + timedelta(minutes=40))
+        self.assertEqual(len(api.writes), 1)
+        self.assertEqual(api.writes[0][1]["end_time"], end)
 
     def test_backfill_authenticates_huckleberry_once(self):
         class Session:

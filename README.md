@@ -8,7 +8,8 @@ Nanitberry can:
 - **Night schedule matching:** Use each child's Huckleberry night schedule to distinguish night from daytime sleep, or use times you configure.
 - **Short wake handling:** Join Nanit sleep segments separated by a short wake. The default gap is 20 minutes; longer wakes remain separate.
 - **Optional daytime sync:** Include automatic daytime sleep when enabled. Manually logged Nanit naps are not imported.
-- **Safe preview:** Review proposed entries before writing. Nanitberry starts in **dry-run, night-only mode** and skips any entry that overlaps existing Huckleberry sleep.
+- **Safe preview:** Review proposed entries before writing. Nanitberry starts in **dry-run, night-only mode** and protects existing Huckleberry sleep.
+- **Sleep corrections:** Revise unchanged entries created by Nanitberry when Nanit supplies updated sleep times. Manual edits and deletions release ownership.
 
 Review a preview against an existing night before enabling writes. Nanitberry never writes to Huckleberry until you opt in.
 
@@ -47,9 +48,9 @@ Review a preview against an existing night before enabling writes. Nanitberry ne
    docker compose up -d
    ```
 
-   The service does not backfill on startup. It checks recent sleep every 15 minutes throughout the day and night. A completed interval becomes eligible once the configured wake gap has elapsed since its end, so a brief wake can still be joined to resumed sleep. The morning cutoff classifies sleep; it does not delay imports.
+   The service does not backfill on startup. It checks recent sleep every 15 minutes throughout the day and night. An interval with a reported end time at or before the check becomes eligible immediately. The wake-gap setting joins nearby sleep segments; it does not delay imports. Nanit may revise the record afterward; unchanged entries owned by Nanitberry can be corrected on later checks. The morning cutoff classifies sleep; it does not delay imports.
 
-The Compose file stores tokens and sync status in `./data`. Replace that path if you need a different writable, persistent location.
+The Compose file stores tokens, sync status, and sleep ownership metadata in `./data`. Replace that path if you need a different writable, persistent location.
 
 ## Configuration
 
@@ -62,8 +63,9 @@ Compose reads values from `.env` or your shell. The required Nanit and Huckleber
 | `NIGHT_START` | `18:00` | Night start when `USE_HUCKLEBERRY_HOURS=false` |
 | `MORNING_CUTOFF` | `10:00` | Morning cutoff when `USE_HUCKLEBERRY_HOURS=false` |
 | `MAX_WAKE_MINUTES` | `20` | Join sleep segments separated by a wake of this length or less; `0` disables joining |
+| `OWNERSHIP_RETENTION_DAYS` | `90` | Retain local ownership and manual-change protection for 7–3650 days after import; expiration never deletes Huckleberry sleep |
 | `SYNC_DAYTIME` | `false` | Also sync automatic sleep during the day |
-| `WRITE_ENABLED` | `false` | Allow new sleep entries to be written to Huckleberry |
+| `WRITE_ENABLED` | `false` | Allow new sleep entries and corrections to unchanged owned entries in Huckleberry |
 | `BACKFILL_DAYS` | `7` | Default number of nights for an explicit backfill |
 | `HEALTH_MAX_AGE_HOURS` | `36` | Mark the service unhealthy if it has not synced successfully within this many hours |
 
@@ -92,7 +94,7 @@ The following sections describe various aspects of how nanitberry syncs data and
 
 By default, each child's night starts and morning cutoff come from their Huckleberry profile. To set your own times, use `USE_HUCKLEBERRY_HOURS=false` and configure `NIGHT_START` and `MORNING_CUTOFF`. The rules and examples below use an 8 p.m. to 7 a.m. window.
 
-The window determines whether Nanitberry treats sleep as night or daytime; it does not trim an interval to fit the window. Automatic sleep segments separated by no more than `MAX_WAKE_MINUTES` are combined into one interval, including the wake minutes. Longer gaps remain separate. Nanitberry waits for a segment to finish and for its wake-gap period to pass before importing it.
+The window determines whether Nanitberry treats sleep as night or daytime; it does not trim an interval to fit the window. Automatic sleep segments separated by no more than `MAX_WAKE_MINUTES` are combined into one interval, including the wake minutes. Longer gaps remain separate. Nanitberry imports available sleep with a reported end time at the next check, without waiting for the wake gap to pass. Later short-wake continuations can extend the same unchanged owned entry.
 
 Daytime sync is off by default. Set `SYNC_DAYTIME=true` to include automatic Nanit sleep between the morning cutoff and the next night start. Manually logged Nanit naps are not imported. A sleep interval that crosses the night start belongs to the night, so it is not also added as a daytime entry.
 
@@ -111,32 +113,35 @@ An interval ending exactly at 8 p.m. is daytime; one starting exactly at 7 a.m. 
 
 ### When sleep is imported
 
-The service checks recent sleep every 15 minutes. An interval is ready to import once Nanit reports it as finished and at least `MAX_WAKE_MINUTES` has elapsed since its end. This applies to both night and daytime sleep. If sleep resumes within the wake gap, the earlier stretch remains pending until the combined interval finishes and its wake gap elapses. Earlier completed intervals can be imported while a later interval is still pending.
+The service checks recent sleep every 15 minutes. An interval is ready to import as soon as Nanit supplies an end time at or before the check. There is no additional wake-gap delay. This applies to both night and daytime sleep, and to corrections of owned entries.
 
-The night window determines classification. Night intervals are eligible regardless of `SYNC_DAYTIME`; daytime intervals are imported only when `SYNC_DAYTIME=true`.
+`MAX_WAKE_MINUTES` controls **joining**, not import timing. If sleep resumes within that gap, later polls combine the available segments and update the same unchanged owned Huckleberry entry. A continuation with no end time does not block importing earlier available sleep; Nanitberry does not invent an end time for the open segment. Setting `MAX_WAKE_MINUTES=0` disables joining across positive wake gaps without changing import timing.
+
+A reported end time does not guarantee that Nanit has finalized its data. Imports are provisional and remain eligible for later corrections while ownership is retained, subject to manual-change protection. Manually editing an imported entry stops its automatic corrections. If later source data joins multiple already imported entries, Nanitberry leaves them for review rather than merging or deleting them automatically.
+
+The night window determines classification. Night intervals are eligible regardless of `SYNC_DAYTIME`; daytime intervals are imported only when `SYNC_DAYTIME=true`. As more segments become available, the combined interval can cross a boundary and belong to the night.
 
 For example, with an **8 p.m.–7 a.m. night window** and **`MAX_WAKE_MINUTES=20`**, suppose sleep runs from **8 p.m.–1 a.m.**, followed by a **30-minute wake**, then sleep from **1:30 a.m.–7 a.m.**:
 
 | Time | Import behavior |
 | --- | --- |
-| 1 a.m. | The first stretch ends; its 20-minute wake gap begins. |
-| 1:20 a.m. | The first stretch's wake gap has elapsed, making it eligible for import. |
-| 1:30 a.m. | The next scheduled check imports the 8 p.m.–1 a.m. stretch. Sleep resumes, but the 30-minute wake exceeds the 20-minute gap, so the stretches remain separate. |
-| 7 a.m. | The second stretch ends and remains pending while its wake gap elapses. |
-| 7:20 a.m. | The second stretch's wake gap has elapsed, making it eligible for import. |
-| 7:30 a.m. | The next scheduled check imports the 1:30 a.m.–7 a.m. stretch. |
+| 1 a.m. | If Nanit has supplied the end time by this check, import the 8 p.m.–1 a.m. stretch immediately. Otherwise import on the first check that sees it. |
+| 1:30 a.m. | The next stretch begins. The 30-minute wake exceeds the 20-minute joining gap, so the stretches remain separate. |
+| 7 a.m. | If Nanit has supplied the second end time by this check, import the 1:30 a.m.–7 a.m. stretch immediately. Otherwise import on the first check that sees it. |
 
-Sleep near the morning cutoff follows the same wake-gap rule. With an **8 p.m.–7 a.m. night window** and **`MAX_WAKE_MINUTES=20`**, a stretch ending at 6:55 a.m. is still pending at 7 a.m.: sleep may resume within its wake gap and become part of the same night interval.
+With a **10-minute wake** instead, the first stretch can still import at 1 a.m. The resumed segment remains open until Nanit supplies its end. Once that end is available, Nanitberry extends the first unchanged owned entry to include the continuation and wake minutes, without creating a second entry.
 
-| Example | Nanit sleep | Resulting interval(s) | Scheduled import |
+Sleep near the morning cutoff follows the same immediate-import rule. For an **8 p.m.–7 a.m. night window** and **`MAX_WAKE_MINUTES=20`**:
+
+| Example | Nanit sleep | Resulting interval(s) | Initial import and later correction |
 | --- | --- | --- | --- |
-| 10-minute wake across the cutoff | 11 p.m.–6:55 a.m., then 7:05–7:40 a.m. | One night interval: 11 p.m.–7:40 a.m., including the wake | 8 a.m., after the combined interval's wake gap elapses |
-| 35-minute wake across the cutoff | 11 p.m.–6:55 a.m., then 7:30–7:40 a.m. | Night: 11 p.m.–6:55 a.m.; daytime: 7:30–7:40 a.m. | Night at 7:15 a.m.; daytime at 8 a.m. only with `SYNC_DAYTIME=true` |
-| Separate daytime nap | 10–11 a.m. | Daytime: 10–11 a.m. | Eligible at 11:20 a.m.; imported at 11:30 a.m. only with `SYNC_DAYTIME=true` |
+| 10-minute wake across the cutoff | 11 p.m.–6:55 a.m., then 7:05–7:40 a.m. | One night interval: 11 p.m.–7:40 a.m., including the wake | Import through 6:55 a.m. at 7 a.m.; extend through 7:40 a.m. at 7:45 a.m. |
+| 35-minute wake across the cutoff | 11 p.m.–6:55 a.m., then 7:30–7:40 a.m. | Night: 11 p.m.–6:55 a.m.; daytime: 7:30–7:40 a.m. | Night at 7 a.m.; daytime at 7:45 a.m. only with `SYNC_DAYTIME=true` |
+| Separate daytime nap | 10–11 a.m. | Daytime: 10–11 a.m. | Import at 11 a.m. if the reported end is available by that check, only with `SYNC_DAYTIME=true` |
 
-These import times assume Nanit's completed records are available, writes are enabled, and there are no overlapping Huckleberry entries. The morning cutoff classifies sleep; an interval becomes ready when its wake gap elapses.
+These times assume Nanit supplies the shown records by the relevant checks, writes are enabled, and there are no conflicting Huckleberry entries or manual changes. Nanit's own reporting delay can make imports later. The morning cutoff classifies sleep; it does not delay imports.
 
-An interval may be imported up to 15 minutes after becoming eligible, or later if Nanit has not yet supplied the completed record. Manual `once` and `backfill` runs use the same readiness rules; they can import eligible sleep from a night still underway.
+An interval may be imported up to 15 minutes after its end time becomes available, depending on the next scheduled check. Manual `once` and `backfill` runs use the same readiness rules and can import available sleep from a night still underway.
 
 ### Scheduler and lookback
 
@@ -148,13 +153,27 @@ The service checks immediately on startup, then at :00, :15, :30, and :45 throug
 | Tuesday at 1:30 a.m. | Monday's period catches eligible sleep from the night that began Monday. Tuesday's period has not begun yet and is skipped. |
 | Tuesday at noon | Monday's period catches any pending overnight sleep; Tuesday's period catches eligible daytime naps when daytime sync is enabled. |
 
-These examples use an 8 p.m.–7 a.m. window. Every interval still follows the wake-gap readiness and night/day classification rules described above.
+These examples use an 8 p.m.–7 a.m. window. Every interval follows the immediate-import and night/day classification rules described above; the wake gap only controls joining.
 
-The same periods are revisited on later checks so pending sleep and newly available Nanit records can be imported. Existing Huckleberry overlap checks prevent duplicate imports. A failed scheduled run is retried at the next check. The scheduler does not automatically backfill older dates; use an explicit `backfill` for those, including sleep missed during a longer service outage.
+The same periods are revisited on later checks so pending sleep and newly available Nanit records can be imported, and unchanged owned entries can be corrected. A failed scheduled run is retried at the next check. The scheduler does not automatically backfill older dates; use an explicit `backfill` for those, including sleep missed during a longer service outage.
 
 ### Conflicts with manual sleep
 
-Before importing, nanitberry compares each proposed interval with Huckleberry sleep for the same child. If even part of the proposed interval overlaps an existing entry, nanitberry skips the entire proposed interval; it does not shorten it to fit around the existing sleep. The rule applies to manual and previously synced sleep. Entries that only meet at the start or end time do not overlap. Nanitberry does not edit or delete existing entries, so if Nanit later changes a sleep record, review and correct Huckleberry manually.
+Before importing, Nanitberry compares each proposed interval with Huckleberry sleep for the same child. Any overlap with an unowned entry blocks the entire proposed interval; it does not shorten sleep to fit. Entries that only meet at the start or end time do not overlap. Existing entries from earlier versions are unowned, even when their times match Nanit.
+
+### Corrections and ownership
+
+Huckleberry stores sleep entries in [Cloud Firestore](https://firebase.google.com/docs/firestore), a Google cloud database that is part of the Firebase app platform. The unofficial `huckleberry-api` client supplies the authenticated Firestore connection. Nanitberry's `huckleberry_sleep.py` adapter isolates private client calls, history reads, and conditional writes because the pinned client version has no sleep-history edit method. Ownership, retention, and Nanit joining policy stay in `sync.py`. You do not need to create a Firebase account or run a database on the NAS.
+
+Nanit can supply an end time while still developing a sleep record, or deliver additional segments later. For new imports, Nanitberry saves the exact Huckleberry document ID, the Nanit child and source range, the last written contents, and the database version in `./data/sleep_ownership.json`. Later polls can revise a single owned entry whose source range still matches or overlaps the proposed Nanit interval. This includes extensions, shorter corrected durations, and adjusted start times. Corrections cannot overlap other Huckleberry sleep. If Nanit joins multiple tracked entries, Nanitberry logs a review warning instead of merging or deleting them. Disappearing Nanit records do not trigger automatic deletion.
+
+Before a correction, the Huckleberry entry must still match both the saved contents and database version. An outside edit (including notes, or an edit returning to the same values) or deletion releases ownership; Nanitberry leaves that entry alone and does not recreate a deleted entry while its tracking remains. A conditional atomic write protects against changes between the final read and write. The sleep entry and applicable `lastSleep` preference are committed together, preserving newer sleep and manually changed preferences. Overlap history is re-read immediately before writing; a newly inserted overlapping entry after that read cannot be excluded by a document-version condition.
+
+Write intent is persisted before contacting Huckleberry. If a crash or network error leaves a write outcome uncertain, Nanitberry logs a review warning and stops managing that source range rather than adopting an unknown record version. A corrupt ownership journal stops syncing until repaired. Dry runs preview creations and corrections without changing the journal or Huckleberry.
+
+### Ownership retention and storage
+
+Ownership metadata is retained for **90 days after creation** by default, controlled by `OWNERSHIP_RETENTION_DAYS`. Repeated polls and corrections do not extend that lifetime. The file stores metadata, not a copy of the calendar or logs; storage stays roughly proportional to the number of imports within the retention period. Expiration only removes local tracking: Huckleberry history remains, becomes unowned, and continues to block overlapping imports. Protection for a deleted entry also expires, so an explicit backfill after expiration can recreate that sleep. Keep a longer retention period if you frequently revisit older nights. Back up this file with your data directory; losing it means existing entries cannot be automatically corrected.
 
 If nanitberry cannot read Huckleberry's sleep history, the run stops without writing. When writes are enabled, it checks history again immediately before each new entry.
 
@@ -162,7 +181,7 @@ If nanitberry cannot read Huckleberry's sleep history, the run stops without wri
 
 Use `docker compose logs nanitberry` to see scheduled runs and `docker compose run --rm nanitberry python sync.py status` to inspect the latest result. The container health check stays unhealthy until the first successful sync, and reports failed or stale syncs. If Nanit rejects its saved token, run the interactive `login` command again.
 
-Use one running container with a given `./data` directory at a time. The saved tokens and status files live there.
+Use one running container with a given `./data` directory at a time. The saved tokens, status, and ownership journal live there. Independent containers using separate data directories must not sync the same child.
 
 ## Development
 
