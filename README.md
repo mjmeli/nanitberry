@@ -84,25 +84,13 @@ docker compose run --rm nanitberry python sync.py children
 
 The Nanit `babies` command needs the saved token from the login step. `children` lists Huckleberry children. Put the JSON value in `.env` as `CHILD_UID_MAP='{"nanit-uid-1":"huckleberry-uid-1"}'`, in your shell, or in `compose.yaml` as `CHILD_UID_MAP: '{"nanit-uid-1":"huckleberry-uid-1"}'`. Each ID can appear only once.
 
-## How night sleep is defined
+## Night and daytime sleep
 
-By default, each child's night begins and ends at the night start and morning cutoff in their Huckleberry profile. You can instead set `USE_HUCKLEBERRY_HOURS=false` and configure `NIGHT_START` and `MORNING_CUTOFF` yourself. For example, an 8 p.m. to 7 a.m. window covers sleep that overlaps that period.
+By default, each child's night starts and morning cutoff come from their Huckleberry profile. To set your own times, use `USE_HUCKLEBERRY_HOURS=false` and configure `NIGHT_START` and `MORNING_CUTOFF`. The rules and examples below use an 8 p.m. to 7 a.m. window.
 
-Nanitberry uses the night window to decide which night owns a sleep interval; it keeps the interval's actual start and end times. So sleep from 7:45 p.m. to 7:20 a.m. is included in full. Sleep ending before 8 p.m. or starting after 7 a.m. is daytime sleep. A sleep segment after 7 a.m. can still be joined to the night if it follows a night segment within `MAX_WAKE_MINUTES`.
+The window determines whether Nanitberry treats sleep as night or daytime; it does not trim an interval to fit the window. Automatic sleep segments separated by no more than `MAX_WAKE_MINUTES` are combined into one interval, including the wake minutes. Longer gaps remain separate. Nanitberry waits for a segment to finish and for its wake-gap period to pass before importing it.
 
-Adjacent automatic sleep segments separated by no more than `MAX_WAKE_MINUTES` are combined into one interval, including the wake minutes. A longer gap leaves them separate. In-progress sleep is held for a later check, and completed sleep is only imported after the wake-gap period has passed.
-
-## Conflicts with manual sleep
-
-Before importing, nanitberry compares each proposed interval with Huckleberry sleep for the same child. If even part of the proposed interval overlaps an existing entry, nanitberry skips the entire proposed interval; it does not shorten it to fit around the existing sleep. The rule applies to manual and previously synced sleep. Entries that only meet at the start or end time do not overlap. Nanitberry does not edit or delete existing entries, so if Nanit later changes a sleep record, review and correct Huckleberry manually.
-
-If nanitberry cannot read Huckleberry's sleep history, the run stops without writing. When writes are enabled, it checks history again immediately before each new entry.
-
-## Daytime vs. nighttime sleep
-
-Daytime sync is off by default. Set `SYNC_DAYTIME=true` to include automatic Nanit sleep between the morning cutoff and the next night start. Manually logged Nanit naps are not imported. A sleep interval that crosses the night start is assigned to the night, so it is not also added as a daytime entry.
-
-The examples below use an 8 p.m. to 7 a.m. night window. Nanitberry keeps the full sleep interval when classifying it; it does not trim sleep to the window. Daytime intervals are included only when `SYNC_DAYTIME=true`.
+Daytime sync is off by default. Set `SYNC_DAYTIME=true` to include automatic Nanit sleep between the morning cutoff and the next night start. Manually logged Nanit naps are not imported. A sleep interval that crosses the night start belongs to the night, so it is not also added as a daytime entry.
 
 | Nanit sleep | Classification | Interval sent to Huckleberry |
 | --- | --- | --- |
@@ -114,6 +102,12 @@ The examples below use an 8 p.m. to 7 a.m. night window. Nanitberry keeps the fu
 | 7:15 a.m.–8:00 a.m. | Daytime; starts after the morning cutoff | Only with daytime sync enabled |
 
 An interval ending exactly at 8 p.m. is daytime; one starting exactly at 7 a.m. is daytime. A post-cutoff segment can still be part of a night interval when it joins a pre-cutoff segment within `MAX_WAKE_MINUTES`.
+
+## Conflicts with manual sleep
+
+Before importing, nanitberry compares each proposed interval with Huckleberry sleep for the same child. If even part of the proposed interval overlaps an existing entry, nanitberry skips the entire proposed interval; it does not shorten it to fit around the existing sleep. The rule applies to manual and previously synced sleep. Entries that only meet at the start or end time do not overlap. Nanitberry does not edit or delete existing entries, so if Nanit later changes a sleep record, review and correct Huckleberry manually.
+
+If nanitberry cannot read Huckleberry's sleep history, the run stops without writing. When writes are enabled, it checks history again immediately before each new entry.
 
 ## Status and troubleshooting
 
