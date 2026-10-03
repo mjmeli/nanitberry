@@ -47,7 +47,7 @@ Review a preview against an existing night before enabling writes. Nanitberry ne
    docker compose up -d
    ```
 
-   The service does not backfill on startup. It checks the previous night every 15 minutes after the morning cutoff. It waits for the configured wake gap to pass before importing a finished sleep, so a brief wake can still be joined to resumed sleep.
+   The service does not backfill on startup. It checks recent sleep every 15 minutes throughout the day and night. A completed interval becomes eligible once the configured wake gap has elapsed since its end, so a brief wake can still be joined to resumed sleep. The morning cutoff classifies sleep; it does not delay imports.
 
 The Compose file stores tokens and sync status in `./data`. Replace that path if you need a different writable, persistent location.
 
@@ -108,6 +108,49 @@ See below for some examples, based on an 8 p.m. to 7 a.m. window:
 | 7:15 a.m.–8:00 a.m. | Daytime; starts after the morning cutoff | Only with daytime sync enabled |
 
 An interval ending exactly at 8 p.m. is daytime; one starting exactly at 7 a.m. is daytime. A post-cutoff segment can still be part of a night interval when it joins a pre-cutoff segment within `MAX_WAKE_MINUTES`.
+
+### When sleep is imported
+
+The service checks recent sleep every 15 minutes. An interval is ready to import once Nanit reports it as finished and at least `MAX_WAKE_MINUTES` has elapsed since its end. This applies to both night and daytime sleep. If sleep resumes within the wake gap, the earlier stretch remains pending until the combined interval finishes and its wake gap elapses. Earlier completed intervals can be imported while a later interval is still pending.
+
+The night window determines classification. Night intervals are eligible regardless of `SYNC_DAYTIME`; daytime intervals are imported only when `SYNC_DAYTIME=true`.
+
+For example, with an **8 p.m.–7 a.m. night window** and **`MAX_WAKE_MINUTES=20`**, suppose sleep runs from **8 p.m.–1 a.m.**, followed by a **30-minute wake**, then sleep from **1:30 a.m.–7 a.m.**:
+
+| Time | Import behavior |
+| --- | --- |
+| 1 a.m. | The first stretch ends; its 20-minute wake gap begins. |
+| 1:20 a.m. | The first stretch's wake gap has elapsed, making it eligible for import. |
+| 1:30 a.m. | The next scheduled check imports the 8 p.m.–1 a.m. stretch. Sleep resumes, but the 30-minute wake exceeds the 20-minute gap, so the stretches remain separate. |
+| 7 a.m. | The second stretch ends and remains pending while its wake gap elapses. |
+| 7:20 a.m. | The second stretch's wake gap has elapsed, making it eligible for import. |
+| 7:30 a.m. | The next scheduled check imports the 1:30 a.m.–7 a.m. stretch. |
+
+Sleep near the morning cutoff follows the same wake-gap rule. With an **8 p.m.–7 a.m. night window** and **`MAX_WAKE_MINUTES=20`**, a stretch ending at 6:55 a.m. is still pending at 7 a.m.: sleep may resume within its wake gap and become part of the same night interval.
+
+| Example | Nanit sleep | Resulting interval(s) | Scheduled import |
+| --- | --- | --- | --- |
+| 10-minute wake across the cutoff | 11 p.m.–6:55 a.m., then 7:05–7:40 a.m. | One night interval: 11 p.m.–7:40 a.m., including the wake | 8 a.m., after the combined interval's wake gap elapses |
+| 35-minute wake across the cutoff | 11 p.m.–6:55 a.m., then 7:30–7:40 a.m. | Night: 11 p.m.–6:55 a.m.; daytime: 7:30–7:40 a.m. | Night at 7:15 a.m.; daytime at 8 a.m. only with `SYNC_DAYTIME=true` |
+| Separate daytime nap | 10–11 a.m. | Daytime: 10–11 a.m. | Eligible at 11:20 a.m.; imported at 11:30 a.m. only with `SYNC_DAYTIME=true` |
+
+These import times assume Nanit's completed records are available, writes are enabled, and there are no overlapping Huckleberry entries. The morning cutoff classifies sleep; an interval becomes ready when its wake gap elapses.
+
+An interval may be imported up to 15 minutes after becoming eligible, or later if Nanit has not yet supplied the completed record. Manual `once` and `backfill` runs use the same readiness rules; they can import eligible sleep from a night still underway.
+
+### Scheduler and lookback
+
+The service checks at :00, :15, :30, and :45 throughout the day and night. On startup, it waits for the next scheduled check. Each check processes the previous calendar date followed by the current date, using the configured `TZ`. Each date covers daytime sleep before that evening and the night beginning that evening, including sleep continuing past the next morning cutoff.
+
+| Check time | Why both dates are checked |
+| --- | --- |
+| Monday at 10:30 p.m. | Sunday's period is revisited, while Monday's period catches eligible sleep from Monday evening. |
+| Tuesday at 1:30 a.m. | Monday's period catches eligible sleep from the night that began Monday. Tuesday's period has not begun yet and is skipped. |
+| Tuesday at noon | Monday's period catches any pending overnight sleep; Tuesday's period catches eligible daytime naps when daytime sync is enabled. |
+
+These examples use an 8 p.m.–7 a.m. window. Every interval still follows the wake-gap readiness and night/day classification rules described above.
+
+The same periods are revisited on later checks so pending sleep and newly available Nanit records can be imported. Existing Huckleberry overlap checks prevent duplicate imports. A failed scheduled run is retried at the next check. The scheduler does not automatically backfill older dates; use an explicit `backfill` for those, including sleep missed during a longer service outage.
 
 ### Conflicts with manual sleep
 

@@ -403,8 +403,8 @@ async def calendar_sleep(client, baby_uid, start, end):
     raise AssertionError("unreachable")
 
 
-def normalize(entries, start, end, max_gap_seconds):
-    """Clip, deduplicate and join segments whose awake gap is sufficiently short."""
+def normalize(entries, start, end, max_gap_seconds, *, clip=True):
+    """Deduplicate and join segments, optionally clipping to the query window."""
     parts = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -417,7 +417,8 @@ def normalize(entries, start, end, max_gap_seconds):
             raise ValueError("Nanit auto_sleep has invalid timestamps") from exc
         if not math.isfinite(a) or not math.isfinite(b) or b <= a:
             raise ValueError("Nanit auto_sleep has invalid timestamps")
-        a, b = max(a, start.timestamp()), min(b, end.timestamp())
+        if clip:
+            a, b = max(a, start.timestamp()), min(b, end.timestamp())
         if a < b:
             parts.append((a, b))
     parts.sort()
@@ -525,7 +526,7 @@ async def backfill(latest_day, days):
             await sync_day(day, context)
 
 
-async def sync_day(day, context=None, skip_incomplete=False):
+async def sync_day(day, context=None):
     """Serialize local runs to prevent a scheduled run racing a manual backfill."""
     STATE.parent.mkdir(parents=True, exist_ok=True)
     with (STATE.parent / "sync.lock").open("a+") as lock:
@@ -535,26 +536,26 @@ async def sync_day(day, context=None, skip_incomplete=False):
             raise RuntimeError("Another sync is running against this data directory") from exc
         status_update("running", "sync_in_progress", last_attempt=utc_now(), night=day.isoformat())
         try:
-            processed = await _sync_day(day, context, skip_incomplete)
+            processed = await _sync_day(day, context)
         except Exception as exc:
             reason, detail = failure_reason(exc)
             status_update("error", reason, detail)
             raise
         if not processed:
-            status_update("waiting", "window_incomplete", "Waiting for the morning cutoff")
+            status_update("waiting", "window_not_started", "Waiting for the requested sleep period to begin")
             return False
         status_update("ok", "sync_succeeded", last_success=utc_now())
         return True
 
 
-async def _sync_day(day, context=None, skip_incomplete=False):
+async def _sync_day(day, context=None):
     if context is None:
         async with aiohttp.ClientSession() as websession:
-            return await _sync_day(day, {"session": websession}, skip_incomplete)
+            return await _sync_day(day, {"session": websession})
     if "clients" not in context:
         context["clients"] = await prepare_clients(context["session"])
     nanit, api, pairs = context["clients"]
-    return await _sync_day_with_clients(day, nanit, api, pairs, skip_incomplete)
+    return await _sync_day_with_clients(day, nanit, api, pairs)
 
 
 async def prepare_clients(websession):
@@ -575,7 +576,7 @@ async def prepare_clients(websession):
     return nanit, api, pairs
 
 
-async def _sync_day_with_clients(day, nanit, api, pairs, skip_incomplete=False, now=None):
+async def _sync_day_with_clients(day, nanit, api, pairs, now=None):
     tz = ZoneInfo(setting("TZ", "America/New_York"))
     gap = int(setting("MAX_WAKE_MINUTES", "20"))
     if not 0 <= gap <= 180:
@@ -599,39 +600,42 @@ async def _sync_day_with_clients(day, nanit, api, pairs, skip_incomplete=False, 
         morning = ranges[-1][2]
         next_evening = local_boundary(day + timedelta(days=1), night_start, tz)
         now_ts = (now or datetime.now(timezone.utc)).timestamp()
-        if morning.timestamp() > now_ts:
-            if skip_incomplete:
-                LOG.info("Night starting %s is not ready for %s", day, huckleberry_uid)
-                all_ready = False
-                continue
-            raise RuntimeError("Window is not complete; retry after morning cutoff")
-        # Ask for the preceding day even in night-only mode. A sleep that began
-        # before night_start may run into the night and must retain its real start.
+        # Include daytime before this evening to preserve sleep crossing night start.
         day_start = local_boundary(day, morning_cutoff, tz)
-        fetch_start = day_start
-        fetch_end = datetime.fromtimestamp(min(next_evening.timestamp(), now_ts), tz)
-        calendar = completed_calendar_entries(
-            await calendar_sleep(nanit, nanit_uid, fetch_start, fetch_end), now_ts)
+        if day_start.timestamp() >= now_ts:
+            all_ready = False
+            continue
+        # Include a pre-cutoff segment that may join a daytime continuation.
+        fetch_start = datetime.fromtimestamp(day_start.timestamp() - gap * 60, tz)
+        # Look past the next evening far enough to discover a short-wake continuation.
+        fetch_end = datetime.fromtimestamp(
+            min(next_evening.timestamp() + gap * 60, now_ts), tz)
+        calendar = await calendar_sleep(nanit, nanit_uid, fetch_start, fetch_end)
+        completed = completed_calendar_entries(calendar, now_ts)
+        active_starts = [float(entry["begin_ts"]) for entry in calendar
+                         if isinstance(entry, dict) and entry.get("type") == "auto_sleep"
+                         and entry.get("end_ts") is None]
         # This strict read propagates failures. The library's list_sleep_intervals
         # catches some Firestore errors and otherwise returns an unsafe empty list.
         existing = [existing_range(x) for x in await strict_sleep_intervals(
             api, huckleberry_uid, fetch_start, fetch_end)]
-        spans = normalize(calendar, fetch_start, fetch_end, gap * 60)
+        # Keep actual boundaries so a cross-cutoff sleep cannot become a daytime nap.
+        spans = normalize(completed, fetch_start, fetch_end, gap * 60, clip=False)
+        ready_end_ts = now_ts - gap * 60
+        spans = [span for span in spans
+                 if span[1].timestamp() <= ready_end_ts
+                 and not any(span[0].timestamp() <= begin <= span[1].timestamp() + gap * 60
+                             for begin in active_starts)]
         spans_by_kind = []
         if include_day:
             # A span crossing the evening boundary belongs wholly to the night.
             day_spans = [span for span in spans
-                         if span[1].timestamp() <= evening.timestamp()]
+                         if span[0].timestamp() >= day_start.timestamp()
+                         and span[1].timestamp() <= evening.timestamp()]
             spans_by_kind.append(("day", day_spans))
         night_spans = [span for span in spans
                        if span[0].timestamp() < morning.timestamp()
                        and span[1].timestamp() > evening.timestamp()]
-        # A short wake may join the last segment. Keep that segment pending until
-        # its wake-gap window has passed, while importing earlier completed sleep.
-        ready_end_ts = now_ts - gap * 60
-        night_spans = [span for span in night_spans
-                       if span[1].timestamp() <= ready_end_ts
-                       and span[1].timestamp() < fetch_end.timestamp()]
         spans_by_kind.append(("night", night_spans))
         for kind, spans in spans_by_kind:
             LOG.info("%s %s: %d Nanit interval(s)", day, kind, len(spans))
@@ -662,8 +666,10 @@ async def scheduled():
             LOG.info("Next sync check at %s", datetime.fromtimestamp(next_tick, tz))
             await asyncio.sleep(max(1, next_tick - now_ts))
             try:
-                await sync_day(datetime.now(tz).date() - timedelta(days=1),
-                               context, skip_incomplete=True)
+                today = datetime.now(tz).date()
+                # Cover the night across midnight and today's daytime/evening sleep.
+                for day in (today - timedelta(days=1), today):
+                    await sync_day(day, context)
             except Exception:
                 LOG.exception("Scheduled sync failed; will retry in 15 minutes")
 
