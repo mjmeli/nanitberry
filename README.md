@@ -13,6 +13,10 @@ Nanitberry can:
 
 Review a preview against an existing night before enabling writes. Nanitberry never writes to Huckleberry until you opt in.
 
+## AI disclosure
+
+Nanitberry was developed primarily with assistance from OpenAI Codex. I review and maintain the project, testing against my child's integrations in Nanit and Huckleberry.
+
 ## Quick start with Docker Compose
 
 1. If you wish to use the `.env` file configuration, copy `.env.example` to `.env` and add your Nanit and Huckleberry email addresses and passwords. Keep `.env` private. Alternatively, you may provide the environment variables via the docker compose or run command directly.
