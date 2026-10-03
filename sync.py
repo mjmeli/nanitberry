@@ -661,17 +661,17 @@ async def scheduled():
     async with aiohttp.ClientSession() as websession:
         context = {"session": websession}
         while True:
-            now_ts = datetime.now(timezone.utc).timestamp()
-            next_tick = (int(now_ts) // (15 * 60) + 1) * (15 * 60)
-            LOG.info("Next sync check at %s", datetime.fromtimestamp(next_tick, tz))
-            await asyncio.sleep(max(1, next_tick - now_ts))
             try:
                 today = datetime.now(tz).date()
                 # Cover the night across midnight and today's daytime/evening sleep.
                 for day in (today - timedelta(days=1), today):
                     await sync_day(day, context)
             except Exception:
-                LOG.exception("Scheduled sync failed; will retry in 15 minutes")
+                LOG.exception("Scheduled sync failed; will retry at the next scheduled check")
+            now_ts = datetime.now(timezone.utc).timestamp()
+            next_tick = (int(now_ts) // (15 * 60) + 1) * (15 * 60)
+            LOG.info("Next sync check at %s", datetime.fromtimestamp(next_tick, tz))
+            await asyncio.sleep(max(1, next_tick - now_ts))
 
 
 def main():
