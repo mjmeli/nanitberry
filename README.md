@@ -15,7 +15,7 @@ Review a preview against an existing night before enabling writes. Nanitberry ne
 
 ## AI disclosure
 
-Nanitberry was developed primarily with assistance from OpenAI Codex. I review and maintain the project.
+Nanitberry was developed primarily with assistance from OpenAI Codex. I review and maintain the project, testing against my child's integrations in Nanit and Huckleberry.
 
 ## Quick start with Docker Compose
 
