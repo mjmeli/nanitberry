@@ -44,8 +44,8 @@ class ServiceTests(unittest.TestCase):
              self.assertLogs(sync.LOG, level="INFO") as captured:
             self.assertTrue(asyncio.run(sync._sync_day_with_clients(
                 date(2020, 9, 27), object(), API(), [("baby", "child")])))
-        self.assertEqual(fetched[0][0], datetime(2020, 9, 27, 7, 15, tzinfo=tz))
-        self.assertEqual(fetched[0][1], datetime(2020, 9, 28, 20, tzinfo=tz))
+        self.assertEqual(fetched[0][0], datetime(2020, 9, 27, 6, 55, tzinfo=tz))
+        self.assertEqual(fetched[0][1], datetime(2020, 9, 28, 20, 20, tzinfo=tz))
         logs = "\n".join(captured.output)
         self.assertIn("DRY RUN 2020-09-27 20:00:00-04:00–2020-09-28 08:45:00-04:00", logs)
         self.assertIn("2020-09-27 night: 1 Nanit interval(s)", logs)
@@ -86,19 +86,18 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual(api.writes[0][1]["start_time"], start)
                 self.assertEqual(api.writes[0][1]["end_time"], end)
 
-    def test_periodic_check_waits_without_fetching_incomplete_night(self):
+    def test_future_period_waits_without_fetching(self):
         class API:
             async def get_child(self, uid):
                 return types.SimpleNamespace(nightStart=8.0, morningCutoff=7.25)
 
         async def no_calendar(*_):
-            self.fail("Calendar should not be read before the cutoff")
+            self.fail("Calendar should not be read before the requested period begins")
 
         with patch.dict(os.environ, {"USE_HUCKLEBERRY_HOURS": "true"}), \
              patch.object(sync, "calendar_sleep", no_calendar):
             ready = asyncio.run(sync._sync_day_with_clients(
-                date(2099, 1, 1), object(), API(), [("baby", "child")],
-                skip_incomplete=True))
+                date(2099, 1, 1), object(), API(), [("baby", "child")]))
         self.assertFalse(ready)
 
     def test_cutoff_imports_finished_sleep_then_late_continuation(self):
