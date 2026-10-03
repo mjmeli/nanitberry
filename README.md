@@ -162,13 +162,9 @@ Before importing, Nanitberry compares each proposed interval with Huckleberry sl
 
 ### Corrections and ownership
 
-Huckleberry stores sleep entries in [Cloud Firestore](https://firebase.google.com/docs/firestore), a Google cloud database that is part of the Firebase app platform. The unofficial `huckleberry-api` client supplies the authenticated Firestore connection. Nanitberry's `huckleberry_sleep.py` adapter isolates private client calls, history reads, and conditional writes because the pinned client version has no sleep-history edit method. Ownership, retention, and Nanit joining policy stay in `sync.py`. You do not need to create a Firebase account or run a database on the NAS.
-
 Nanit can supply an end time while still developing a sleep record, or deliver additional segments later. For new imports, Nanitberry saves the exact Huckleberry document ID, the Nanit child and source range, the last written contents, and the database version in `./data/sleep_ownership.json`. Later polls can revise a single owned entry whose source range still matches or overlaps the proposed Nanit interval. This includes extensions, shorter corrected durations, and adjusted start times. Corrections cannot overlap other Huckleberry sleep. If Nanit joins multiple tracked entries, Nanitberry logs a review warning instead of merging or deleting them. Disappearing Nanit records do not trigger automatic deletion.
 
 Before a correction, the Huckleberry entry must still match both the saved contents and database version. An outside edit (including notes, or an edit returning to the same values) or deletion releases ownership; Nanitberry leaves that entry alone and does not recreate a deleted entry while its tracking remains. A conditional atomic write protects against changes between the final read and write. The sleep entry and applicable `lastSleep` preference are committed together, preserving newer sleep and manually changed preferences. Overlap history is re-read immediately before writing; a newly inserted overlapping entry after that read cannot be excluded by a document-version condition.
-
-Write intent is persisted before contacting Huckleberry. If a crash or network error leaves a write outcome uncertain, Nanitberry logs a review warning and stops managing that source range rather than adopting an unknown record version. A corrupt ownership journal stops syncing until repaired. Dry runs preview creations and corrections without changing the journal or Huckleberry.
 
 ### Ownership retention and storage
 
