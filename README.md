@@ -63,7 +63,6 @@ Compose reads values from `.env` or your shell. The required Nanit and Huckleber
 | `NIGHT_START` | `18:00` | Night start when `USE_HUCKLEBERRY_HOURS=false` |
 | `MORNING_CUTOFF` | `10:00` | Morning cutoff when `USE_HUCKLEBERRY_HOURS=false` |
 | `MAX_WAKE_MINUTES` | `20` | Join sleep segments separated by a wake of this length or less; `0` disables joining |
-| `OWNERSHIP_RETENTION_DAYS` | `90` | Retain local ownership and manual-change protection for 7–3650 days after import; expiration never deletes Huckleberry sleep |
 | `SYNC_DAYTIME` | `false` | Also sync automatic sleep during the day |
 | `WRITE_ENABLED` | `false` | Allow new sleep entries and corrections to unchanged owned entries in Huckleberry |
 | `BACKFILL_DAYS` | `7` | Default number of nights for an explicit backfill |
@@ -173,7 +172,7 @@ Write intent is persisted before contacting Huckleberry. If a crash or network e
 
 ### Ownership retention and storage
 
-Ownership metadata is retained for **90 days after creation** by default, controlled by `OWNERSHIP_RETENTION_DAYS`. Repeated polls and corrections do not extend that lifetime. The file stores metadata, not a copy of the calendar or logs; storage stays roughly proportional to the number of imports within the retention period. Expiration only removes local tracking: Huckleberry history remains, becomes unowned, and continues to block overlapping imports. Protection for a deleted entry also expires, so an explicit backfill after expiration can recreate that sleep. Keep a longer retention period if you frequently revisit older nights. Back up this file with your data directory; losing it means existing entries cannot be automatically corrected.
+Ownership metadata is retained for **90 days after creation**. Repeated polls and corrections do not extend that lifetime. The file stores metadata, not a copy of the calendar or logs; storage stays roughly proportional to the number of imports within the retention period. Expiration only removes local tracking: Huckleberry history remains, becomes unowned, and continues to block overlapping imports. Protection for a deleted entry also expires, so an explicit backfill after expiration can recreate that sleep. Back up this file with your data directory; losing it means existing entries cannot be automatically corrected.
 
 If nanitberry cannot read Huckleberry's sleep history, the run stops without writing. When writes are enabled, it checks history again immediately before each new entry.
 

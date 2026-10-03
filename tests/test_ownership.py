@@ -85,9 +85,6 @@ class OwnershipTests(unittest.TestCase):
         self.state_patch = patch.object(sync, 'STATE', Path(self.tmp.name) / 'nanit_tokens.json')
         self.state_patch.start()
         self.addCleanup(self.state_patch.stop)
-        self.env_patch = patch.dict(os.environ, {'OWNERSHIP_RETENTION_DAYS': '90'})
-        self.env_patch.start()
-        self.addCleanup(self.env_patch.stop)
         errors = types.ModuleType('google.api_core.exceptions')
         errors.AlreadyExists, errors.FailedPrecondition, errors.NotFound = AlreadyExists, PreconditionFailed, NotFound
         firestore = types.ModuleType('google.cloud.firestore_v1')
@@ -364,10 +361,7 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(self.store.data['records'], {})
         self.assertEqual(self.db.commits, 0)
 
-    def test_retention_bounds_and_protected_deletion_expire(self):
-        for days in ('0', '6', '3651'):
-            with patch.dict(os.environ, {'OWNERSHIP_RETENTION_DAYS': days}):
-                with self.assertRaises(ValueError): self.reload()
+    def test_fixed_retention_and_protected_deletion_expire(self):
         key, path = self.created()
         del self.db.rows[path]
         self.apply()

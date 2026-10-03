@@ -24,6 +24,7 @@ LOG = logging.getLogger("nanit_huckleberry_sync")
 API = "https://api.nanit.com"
 STATE = Path("/data/nanit_tokens.json")
 STATUS = STATE.with_name("sync_status.json")
+OWNERSHIP_RETENTION_DAYS = 90
 
 
 class NanitReauthRequired(RuntimeError):
@@ -487,9 +488,6 @@ class SleepOwnership:
     def __init__(self, now_ts):
         self.path = STATE.with_name("sleep_ownership.json")
         self.now_ts = now_ts
-        days = int(setting("OWNERSHIP_RETENTION_DAYS", "90"))
-        if not 7 <= days <= 3650:
-            raise ValueError("OWNERSHIP_RETENTION_DAYS must be between 7 and 3650")
         try:
             self.data = json.loads(self.path.read_text())
         except FileNotFoundError:
@@ -509,7 +507,7 @@ class SleepOwnership:
                     or row["source_end"] <= row["source_start"]
                     or not all(field in row["payload"] for field in ("start", "duration", "offset"))):
                 raise ValueError("Invalid sleep ownership record")
-            if float(row["created_at"]) < now_ts - days * 86400:
+            if float(row["created_at"]) < now_ts - OWNERSHIP_RETENTION_DAYS * 86400:
                 del self.data["records"][key]
 
     def save(self):
