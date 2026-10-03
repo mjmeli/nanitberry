@@ -7,10 +7,15 @@ from datetime import date, datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync
+from tests.support import sync, SyntheticOwnership
 
 
 class UidDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        ownership_patch.start()
+        self.addCleanup(ownership_patch.stop)
+
     def test_selection_requires_a_single_child(self):
         self.assertEqual(sync.select_uid([("A", "a")], "Nanit"), "a")
         for children in ([], [("A", "a"), ("B", "b")], [("A", "")]):

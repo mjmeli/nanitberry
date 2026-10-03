@@ -13,10 +13,15 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync
+from tests.support import sync, SyntheticOwnership
 
 
 class HuckleberryTests(unittest.TestCase):
+    def setUp(self):
+        ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        ownership_patch.start()
+        self.addCleanup(ownership_patch.stop)
+
     def test_refresh_token_survives_new_client_and_rotation(self):
         class API:
             password_logins = 0
@@ -133,7 +138,7 @@ class HuckleberryTests(unittest.TestCase):
                     def stream(self):
                         async def documents():
                             for row in rows:
-                                yield types.SimpleNamespace(to_dict=lambda row=row: row)
+                                yield types.SimpleNamespace(id="test-document", to_dict=lambda row=row: row)
                         return documents()
                 return Query()
 

@@ -7,11 +7,14 @@ from datetime import date, datetime
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync
+from tests.support import sync, SyntheticOwnership
 
 
 class LiveSyncTests(unittest.TestCase):
     def setUp(self):
+        self.ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        self.ownership_patch.start()
+        self.addCleanup(self.ownership_patch.stop)
         self.tz = ZoneInfo("America/New_York")
         self.entries = []
         self.writes = []
@@ -49,17 +52,17 @@ class LiveSyncTests(unittest.TestCase):
             asyncio.run(sync._sync_day_with_clients(
                 date(2026, 10, day), object(), api, [("baby", "child")], now=now))
 
-    def test_night_imports_after_gap_before_morning_without_duplicates(self):
+    def test_night_imports_at_reported_end_without_duplicates(self):
         first = (self.at(1, 20), self.at(2, 1))
         second = (self.at(2, 1, 30), self.at(2, 7))
         self.add_sleep(*first)
+        self.poll(1, self.at(2, 1))
+        self.assertEqual(self.writes, [first])
         self.poll(1, self.at(2, 1, 15))
-        self.assertEqual(self.writes, [])
-        self.poll(1, self.at(2, 1, 20))
         self.assertEqual(self.writes, [first])
         self.add_sleep(*second)
         self.poll(1, self.at(2, 7))
-        self.assertEqual(self.writes, [first])
+        self.assertEqual(self.writes, [first, second])
         self.poll(1, self.at(2, 7, 30))
         self.poll(2, self.at(2, 7, 30))
         self.assertEqual(self.writes, [first, second])
@@ -70,25 +73,23 @@ class LiveSyncTests(unittest.TestCase):
         self.poll(1, self.at(1, 21, 30))
         self.assertEqual(self.writes, [span])
 
-    def test_daytime_requires_enablement_and_same_gap(self):
+    def test_daytime_requires_enablement_without_added_delay(self):
         span = (self.at(2, 10), self.at(2, 11))
         self.add_sleep(*span)
         self.poll(2, self.at(2, 11, 30))
         self.assertEqual(self.writes, [])
         self.env["SYNC_DAYTIME"] = "true"
+        self.poll(2, self.at(2, 11))
+        self.assertEqual(self.writes, [span])
         self.poll(2, self.at(2, 11, 15))
-        self.assertEqual(self.writes, [])
-        self.poll(2, self.at(2, 11, 20))
         self.assertEqual(self.writes, [span])
 
-    def test_active_short_wake_continuation_keeps_earlier_sleep_pending(self):
-        self.add_sleep(self.at(1, 20), self.at(2, 1))
+    def test_open_continuation_does_not_block_available_sleep(self):
+        first = (self.at(1, 20), self.at(2, 1))
+        self.add_sleep(*first)
         self.add_sleep(self.at(2, 1, 10))
-        self.poll(1, self.at(2, 1, 30))
-        self.assertEqual(self.writes, [])
-        self.entries[-1]["end_ts"] = self.at(2, 2).timestamp()
-        self.poll(1, self.at(2, 2, 20))
-        self.assertEqual(self.writes, [(self.at(1, 20), self.at(2, 2))])
+        self.poll(1, self.at(2, 1, 15))
+        self.assertEqual(self.writes, [first])
 
     def test_short_wake_crossing_cutoff_stays_night_in_both_date_queries(self):
         self.env["SYNC_DAYTIME"] = "true"
@@ -109,17 +110,13 @@ class LiveSyncTests(unittest.TestCase):
         self.poll(1, self.at(1, 21))
         self.assertEqual(self.writes, [(self.at(1, 20), self.at(1, 21))])
 
-    def test_daytime_short_wake_crossing_evening_waits_and_becomes_night(self):
+    def test_available_daytime_sleep_is_imported_while_night_continuation_is_open(self):
         self.env["SYNC_DAYTIME"] = "true"
-        self.add_sleep(self.at(1, 19), self.at(1, 19, 50))
+        first = (self.at(1, 19), self.at(1, 19, 50))
+        self.add_sleep(*first)
         self.add_sleep(self.at(1, 20))
         self.poll(1, self.at(1, 20, 15))
-        self.assertEqual(self.writes, [])
-        self.entries[-1]["end_ts"] = self.at(1, 21).timestamp()
-        # The combined interval imports even with daytime tracking disabled.
-        self.env["SYNC_DAYTIME"] = "false"
-        self.poll(1, self.at(1, 21, 30))
-        self.assertEqual(self.writes, [(self.at(1, 19), self.at(1, 21))])
+        self.assertEqual(self.writes, [first])
 
     def test_long_wake_after_cutoff_creates_optional_daytime_entry(self):
         first = (self.at(1, 23), self.at(2, 6, 55))
