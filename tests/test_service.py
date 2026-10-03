@@ -10,12 +10,17 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync, SyntheticOwnership
+from tests.support import SyntheticOwnership
+import clients
+import config
+import service
+import storage
+import huckleberry_sleep
 
 
 class ServiceTests(unittest.TestCase):
     def setUp(self):
-        ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        ownership_patch = patch.object(service, "SleepOwnership", SyntheticOwnership)
         ownership_patch.start()
         self.addCleanup(ownership_patch.stop)
 
@@ -44,10 +49,10 @@ class ServiceTests(unittest.TestCase):
                "NIGHT_START": "ignored", "MORNING_CUTOFF": "ignored",
                "MAX_WAKE_MINUTES": "20", "SYNC_DAYTIME": "false", "WRITE_ENABLED": "false"}
         with patch.dict(os.environ, env), \
-             patch.object(sync, "calendar_sleep", calendar), \
-             patch.object(sync, "strict_sleep_intervals", history), \
-             self.assertLogs(sync.LOG, level="INFO") as captured:
-            self.assertTrue(asyncio.run(sync._sync_day_with_clients(
+             patch.object(clients, "calendar_sleep", calendar), \
+             patch.object(huckleberry_sleep, "strict_sleep_intervals", history), \
+             self.assertLogs(service.LOG, level="INFO") as captured:
+            self.assertTrue(asyncio.run(service._sync_day_with_clients(
                 date(2020, 9, 27), object(), API(), [("baby", "child")])))
         self.assertEqual(fetched[0][0], datetime(2020, 9, 27, 6, 55, tzinfo=tz))
         self.assertEqual(fetched[0][1], datetime(2020, 9, 28, 20, 20, tzinfo=tz))
@@ -82,9 +87,9 @@ class ServiceTests(unittest.TestCase):
                 api = API()
                 api.writes = []
                 with patch.dict(os.environ, env), \
-                     patch.object(sync, "calendar_sleep", calendar), \
-                     patch.object(sync, "strict_sleep_intervals", history):
-                    asyncio.run(sync._sync_day_with_clients(
+                     patch.object(clients, "calendar_sleep", calendar), \
+                     patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+                    asyncio.run(service._sync_day_with_clients(
                         date(2026, 10, 1), object(), api, [("baby", "child")],
                         now=datetime(2026, 10, 2, 8, tzinfo=tz)))
                 self.assertEqual(len(api.writes), 1)
@@ -100,8 +105,8 @@ class ServiceTests(unittest.TestCase):
             self.fail("Calendar should not be read before the requested period begins")
 
         with patch.dict(os.environ, {"USE_HUCKLEBERRY_HOURS": "true"}), \
-             patch.object(sync, "calendar_sleep", no_calendar):
-            ready = asyncio.run(sync._sync_day_with_clients(
+             patch.object(clients, "calendar_sleep", no_calendar):
+            ready = asyncio.run(service._sync_day_with_clients(
                 date(2099, 1, 1), object(), API(), [("baby", "child")]))
         self.assertFalse(ready)
 
@@ -137,20 +142,20 @@ class ServiceTests(unittest.TestCase):
         env = {"TZ": "America/New_York", "USE_HUCKLEBERRY_HOURS": "true",
                "MAX_WAKE_MINUTES": "20", "SYNC_DAYTIME": "false", "WRITE_ENABLED": "true"}
         with patch.dict(os.environ, env), \
-             patch.object(sync, "calendar_sleep", calendar), \
-             patch.object(sync, "strict_sleep_intervals", history):
-            self.assertTrue(asyncio.run(sync._sync_day_with_clients(
+             patch.object(clients, "calendar_sleep", calendar), \
+             patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+            self.assertTrue(asyncio.run(service._sync_day_with_clients(
                 day, object(), api, [("baby", "child")], now=morning)))
             self.assertEqual(len(api.writes), 1)
             self.assertEqual(api.writes[0][1]["end_time"], evening + timedelta(hours=3))
             self.assertEqual(fetched[0][1], morning)
 
             entries = [early, finished]
-            self.assertTrue(asyncio.run(sync._sync_day_with_clients(
+            self.assertTrue(asyncio.run(service._sync_day_with_clients(
                 day, object(), api, [("baby", "child")],
                 now=morning + timedelta(minutes=30))))
             self.assertEqual(len(api.writes), 2)
-            self.assertTrue(asyncio.run(sync._sync_day_with_clients(
+            self.assertTrue(asyncio.run(service._sync_day_with_clients(
                 day, object(), api, [("baby", "child")],
                 now=morning + timedelta(minutes=45))))
             self.assertEqual(len(api.writes), 2)
@@ -174,9 +179,9 @@ class ServiceTests(unittest.TestCase):
         async def history(*_): return []
         env = {"TZ": "America/New_York", "USE_HUCKLEBERRY_HOURS": "true",
                "MAX_WAKE_MINUTES": "20", "SYNC_DAYTIME": "false", "WRITE_ENABLED": "true"}
-        with patch.dict(os.environ, env), patch.object(sync, "calendar_sleep", calendar), \
-             patch.object(sync, "strict_sleep_intervals", history):
-            asyncio.run(sync._sync_day_with_clients(
+        with patch.dict(os.environ, env), patch.object(clients, "calendar_sleep", calendar), \
+             patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+            asyncio.run(service._sync_day_with_clients(
                 date(2026, 10, 1), object(), api, [("baby", "child")], now=morning))
         self.assertEqual(len(api.writes), 1)
         self.assertEqual(api.writes[0][1]["end_time"], end)
@@ -201,42 +206,42 @@ class ServiceTests(unittest.TestCase):
                "HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "false",
                "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
-        original_state, original_status = sync.STATE, sync.STATUS
+        original_state, original_status = config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                sync.STATE = Path(tmp) / "nanit_tokens.json"
-                sync.STATUS = Path(tmp) / "sync_status.json"
+                config.DEFAULT_PATHS.tokens = Path(tmp) / "nanit_tokens.json"
+                config.DEFAULT_PATHS.status = Path(tmp) / "sync_status.json"
                 with patch.dict(os.environ, env), \
-                     patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-                     patch.object(sync, "HuckleberryAPI", API), \
-                     patch.object(sync, "restore_nanit", lambda _: object()), \
-                     patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
-                     patch.object(sync, "calendar_sleep", calendar), \
-                     patch.object(sync, "strict_sleep_intervals", history):
-                    asyncio.run(sync.backfill(date(2020, 9, 28), 2))
+                     patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+                     patch.object(clients, "HuckleberryAPI", API), \
+                     patch.object(clients, "restore_nanit", lambda _, **kwargs: object()), \
+                     patch.object(clients, "validate_uid_pairs", new_callable=AsyncMock), \
+                     patch.object(clients, "calendar_sleep", calendar), \
+                     patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+                    asyncio.run(service.backfill(date(2020, 9, 28), 2))
                 self.assertEqual(API.authentications, 1)
                 self.assertEqual(dates, [date(2020, 9, 27), date(2020, 9, 28)])
         finally:
-            sync.STATE, sync.STATUS = original_state, original_status
+            config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status = original_state, original_status
 
     def test_health_reports_reauth_and_stale_runs(self):
-        original_state, original_status = sync.STATE, sync.STATUS
+        original_state, original_status = config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                sync.STATE = Path(tmp) / "nanit_tokens.json"
-                sync.STATUS = Path(tmp) / "sync_status.json"
-                self.assertIn("nanit_reauth_required", sync.health_status()[1])
-                sync.STATE.write_text("{}")
-                self.assertIn("nanit_reauth_required", sync.health_status()[1])
-                sync.save_tokens({"access_token": "a", "refresh_token": "r"})
-                sync.status_update("waiting", "scheduler_started", service_started=sync.utc_now())
-                self.assertIn("no_successful_run", sync.health_status()[1])
-                sync.status_update("error", "nanit_reauth_required", "Run interactive login")
-                self.assertIn("nanit_reauth_required", sync.health_status()[1])
-                sync.status_update("ok", "sync_succeeded", last_success="2020-01-01T00:00:00+00:00")
-                self.assertIn("sync_stale", sync.health_status()[1])
+                config.DEFAULT_PATHS.tokens = Path(tmp) / "nanit_tokens.json"
+                config.DEFAULT_PATHS.status = Path(tmp) / "sync_status.json"
+                self.assertIn("nanit_reauth_required", storage.health_status()[1])
+                config.DEFAULT_PATHS.tokens.write_text("{}")
+                self.assertIn("nanit_reauth_required", storage.health_status()[1])
+                storage.save_tokens({"access_token": "a", "refresh_token": "r"})
+                storage.status_update("waiting", "scheduler_started", service_started=storage.utc_now())
+                self.assertIn("no_successful_run", storage.health_status()[1])
+                storage.status_update("error", "nanit_reauth_required", "Run interactive login")
+                self.assertIn("nanit_reauth_required", storage.health_status()[1])
+                storage.status_update("ok", "sync_succeeded", last_success="2020-01-01T00:00:00+00:00")
+                self.assertIn("sync_stale", storage.health_status()[1])
         finally:
-            sync.STATE, sync.STATUS = original_state, original_status
+            config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status = original_state, original_status
 
     def test_full_sync_fails_closed_on_history_error_or_bad_calendar_data(self):
         evening = datetime(2020, 9, 27, 20, tzinfo=ZoneInfo("America/New_York"))
@@ -258,12 +263,12 @@ class ServiceTests(unittest.TestCase):
                "HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "true",
                "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
-        original_state, original_status = sync.STATE, sync.STATUS
+        original_state, original_status = config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                sync.STATE = Path(tmp) / "nanit_tokens.json"
-                sync.STATUS = Path(tmp) / "sync_status.json"
-                sync.save_tokens({"access_token": "a", "refresh_token": "r"})
+                config.DEFAULT_PATHS.tokens = Path(tmp) / "nanit_tokens.json"
+                config.DEFAULT_PATHS.status = Path(tmp) / "sync_status.json"
+                storage.save_tokens({"access_token": "a", "refresh_token": "r"})
                 for scenario in ("history_unavailable", "malformed_calendar"):
                     with self.subTest(scenario=scenario):
                         async def calendar(*_):
@@ -275,19 +280,19 @@ class ServiceTests(unittest.TestCase):
                             return []
 
                         with patch.dict(os.environ, env), \
-                             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-                             patch.object(sync, "HuckleberryAPI", API), \
-                             patch.object(sync, "restore_nanit", lambda _: object()), \
-                             patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
-                             patch.object(sync, "calendar_sleep", calendar), \
-                             patch.object(sync, "strict_sleep_intervals", history):
+                             patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+                             patch.object(clients, "HuckleberryAPI", API), \
+                             patch.object(clients, "restore_nanit", lambda _, **kwargs: object()), \
+                             patch.object(clients, "validate_uid_pairs", new_callable=AsyncMock), \
+                             patch.object(clients, "calendar_sleep", calendar), \
+                             patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
                             with self.assertRaises((ConnectionError, ValueError)):
-                                asyncio.run(sync.sync_day(date(2020, 9, 27)))
+                                asyncio.run(service.sync_day(date(2020, 9, 27)))
                         self.assertEqual(API.writes, [])
-                        self.assertEqual(json.loads(sync.STATUS.read_text())["state"], "error")
-                        self.assertFalse(sync.health_status()[0])
+                        self.assertEqual(json.loads(config.DEFAULT_PATHS.status.read_text())["state"], "error")
+                        self.assertFalse(storage.health_status()[0])
         finally:
-            sync.STATE, sync.STATUS = original_state, original_status
+            config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status = original_state, original_status
 
     def test_dry_run_with_available_history_reports_success_without_write(self):
         evening = datetime(2020, 9, 27, 20, tzinfo=ZoneInfo("America/New_York"))
@@ -310,22 +315,22 @@ class ServiceTests(unittest.TestCase):
                "HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "false",
                "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
-        original_state, original_status = sync.STATE, sync.STATUS
+        original_state, original_status = config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                sync.STATE = Path(tmp) / "nanit_tokens.json"
-                sync.STATUS = Path(tmp) / "sync_status.json"
-                sync.save_tokens({"access_token": "a", "refresh_token": "r"})
+                config.DEFAULT_PATHS.tokens = Path(tmp) / "nanit_tokens.json"
+                config.DEFAULT_PATHS.status = Path(tmp) / "sync_status.json"
+                storage.save_tokens({"access_token": "a", "refresh_token": "r"})
                 with patch.dict(os.environ, env), \
-                     patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-                     patch.object(sync, "HuckleberryAPI", API), \
-                     patch.object(sync, "restore_nanit", lambda _: object()), \
-                     patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
-                     patch.object(sync, "calendar_sleep", calendar), \
-                     patch.object(sync, "strict_sleep_intervals", history):
-                    asyncio.run(sync.sync_day(date(2020, 9, 27)))
+                     patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+                     patch.object(clients, "HuckleberryAPI", API), \
+                     patch.object(clients, "restore_nanit", lambda _, **kwargs: object()), \
+                     patch.object(clients, "validate_uid_pairs", new_callable=AsyncMock), \
+                     patch.object(clients, "calendar_sleep", calendar), \
+                     patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+                    asyncio.run(service.sync_day(date(2020, 9, 27)))
                 self.assertEqual(API.writes, [])
-                self.assertEqual(json.loads(sync.STATUS.read_text())["state"], "ok")
-                self.assertTrue(sync.health_status()[0])
+                self.assertEqual(json.loads(config.DEFAULT_PATHS.status.read_text())["state"], "ok")
+                self.assertTrue(storage.health_status()[0])
         finally:
-            sync.STATE, sync.STATUS = original_state, original_status
+            config.DEFAULT_PATHS.tokens, config.DEFAULT_PATHS.status = original_state, original_status

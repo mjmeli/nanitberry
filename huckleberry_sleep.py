@@ -2,7 +2,7 @@
 
 Keep private client methods and Firestore details here until public history
 methods provide the required identity and conditional-write semantics.
-Ownership, Nanit joining, retention, and conflict policy belong in sync.py.
+Ownership and conflict policy live in ownership.py; sleep rules live in intervals.py.
 """
 from dataclasses import dataclass, field
 
@@ -130,3 +130,8 @@ class HuckleberrySleepAdapter:
                                              "timestamp": {"seconds": now_ts},
                                              "local_timestamp": now_ts}})
         return PreparedSleepWrite(batch)
+
+
+async def strict_sleep_intervals(api, child_uid, start, end):
+    """Read overlapping Huckleberry history through the storage adapter."""
+    return await HuckleberrySleepAdapter(api).list_intervals(child_uid, start, end)

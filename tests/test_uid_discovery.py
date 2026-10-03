@@ -7,20 +7,24 @@ from datetime import date, datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync, SyntheticOwnership
+from tests.support import SyntheticOwnership
+import clients
+import errors
+import service
+import huckleberry_sleep
 
 
 class UidDiscoveryTests(unittest.TestCase):
     def setUp(self):
-        ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        ownership_patch = patch.object(service, "SleepOwnership", SyntheticOwnership)
         ownership_patch.start()
         self.addCleanup(ownership_patch.stop)
 
     def test_selection_requires_a_single_child(self):
-        self.assertEqual(sync.select_uid([("A", "a")], "Nanit"), "a")
+        self.assertEqual(clients.select_uid([("A", "a")], "Nanit"), "a")
         for children in ([], [("A", "a"), ("B", "b")], [("A", "")]):
-            with self.subTest(children=children), self.assertRaises(sync.UidSelectionRequired):
-                sync.select_uid(children, "Nanit")
+            with self.subTest(children=children), self.assertRaises(errors.UidSelectionRequired):
+                clients.select_uid(children, "Nanit")
 
     def test_startup_logs_both_accounts_without_uids(self):
         class Session:
@@ -42,11 +46,11 @@ class UidDiscoveryTests(unittest.TestCase):
         with patch.dict(os.environ, {"CHILD_UID_MAP": "",
                                       "HUCKLEBERRY_EMAIL": "test@example.invalid",
                                       "HUCKLEBERRY_PASSWORD": "unused"}), \
-             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "HuckleberryAPI", API), \
-             patch.object(sync, "restore_nanit", lambda _: Nanit()), \
-             self.assertLogs(sync.LOG, level="INFO") as captured:
-            asyncio.run(sync.log_missing_uids())
+             patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(clients, "HuckleberryAPI", API), \
+             patch.object(clients, "restore_nanit", lambda _, **kwargs: Nanit()), \
+             self.assertLogs(service.LOG, level="INFO") as captured:
+            asyncio.run(clients.log_missing_uids())
         logs = "\n".join(captured.output)
         for uid in ("n-1", "h-1", "h-2"):
             self.assertIn(uid, logs)
@@ -79,12 +83,12 @@ class UidDiscoveryTests(unittest.TestCase):
                "HUCKLEBERRY_EMAIL": "test@example.invalid", "HUCKLEBERRY_PASSWORD": "unused",
                "USE_HUCKLEBERRY_HOURS": "false"}
         with patch.dict(os.environ, env), \
-             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "HuckleberryAPI", API), \
-             patch.object(sync, "restore_nanit", lambda _: Nanit()), \
-             patch.object(sync, "calendar_sleep", calendar), \
-             patch.object(sync, "strict_sleep_intervals", history):
-            asyncio.run(sync._sync_day(date(2020, 9, 27)))
+             patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(clients, "HuckleberryAPI", API), \
+             patch.object(clients, "restore_nanit", lambda _, **kwargs: Nanit()), \
+             patch.object(clients, "calendar_sleep", calendar), \
+             patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+            asyncio.run(service._sync_day(date(2020, 9, 27)))
         self.assertEqual(seen, [("nanit", "n-1"), ("huckleberry", "h-1")])
 
     def test_missing_nanit_login_does_not_hide_huckleberry_ids(self):
@@ -101,11 +105,11 @@ class UidDiscoveryTests(unittest.TestCase):
         env = {"CHILD_UID_MAP": "",
                "HUCKLEBERRY_EMAIL": "test@example.invalid", "HUCKLEBERRY_PASSWORD": "unused"}
         with patch.dict(os.environ, env), \
-             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "HuckleberryAPI", API), \
-             patch.object(sync, "restore_nanit", side_effect=sync.NanitReauthRequired()), \
-             self.assertLogs(sync.LOG, level="INFO") as captured:
-            asyncio.run(sync.log_missing_uids())
+             patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(clients, "HuckleberryAPI", API), \
+             patch.object(clients, "restore_nanit", side_effect=errors.NanitReauthRequired()), \
+             self.assertLogs(service.LOG, level="INFO") as captured:
+            asyncio.run(clients.log_missing_uids())
         logs = "\n".join(captured.output)
         self.assertIn("login is required", logs)
         self.assertIn("h-1", logs)
@@ -117,12 +121,12 @@ class UidDiscoveryTests(unittest.TestCase):
         )
         for value in bad_maps:
             with self.subTest(value=value), patch.dict(os.environ, {"CHILD_UID_MAP": value}):
-                with self.assertRaises(sync.UidSelectionRequired):
-                    sync.configured_uid_pairs()
+                with self.assertRaises(errors.UidSelectionRequired):
+                    clients.configured_uid_pairs()
         with patch.dict(os.environ, {"CHILD_UID_MAP": '{"n-1":"h-1"}'}):
-            self.assertEqual(sync.configured_uid_pairs(), [("n-1", "h-1")])
+            self.assertEqual(clients.configured_uid_pairs(), [("n-1", "h-1")])
         with patch.dict(os.environ, {"CHILD_UID_MAP": ""}):
-            self.assertIsNone(sync.configured_uid_pairs())
+            self.assertIsNone(clients.configured_uid_pairs())
 
     def test_map_writes_each_nanit_child_to_its_matching_huckleberry_child(self):
         evening = datetime(2020, 9, 27, 20, tzinfo=ZoneInfo("America/New_York"))
@@ -159,12 +163,12 @@ class UidDiscoveryTests(unittest.TestCase):
                "WRITE_ENABLED": "true", "SYNC_DAYTIME": "false", "USE_HUCKLEBERRY_HOURS": "false"}
         API.writes = []
         with patch.dict(os.environ, env), \
-             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "HuckleberryAPI", API), \
-             patch.object(sync, "restore_nanit", lambda _: Nanit()), \
-             patch.object(sync, "calendar_sleep", calendar), \
-             patch.object(sync, "strict_sleep_intervals", history):
-            asyncio.run(sync._sync_day(date(2020, 9, 27)))
+             patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(clients, "HuckleberryAPI", API), \
+             patch.object(clients, "restore_nanit", lambda _, **kwargs: Nanit()), \
+             patch.object(clients, "calendar_sleep", calendar), \
+             patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+            asyncio.run(service._sync_day(date(2020, 9, 27)))
         self.assertEqual(API.writes, ["h-1", "h-2"])
         self.assertEqual(seen, [("calendar", "n-1"), ("history", "h-1"), ("history", "h-1"),
                                 ("calendar", "n-2"), ("history", "h-2"), ("history", "h-2")])
@@ -179,5 +183,5 @@ class UidDiscoveryTests(unittest.TestCase):
                 return types.SimpleNamespace(childList=[types.SimpleNamespace(cid="h-1")])
 
         for pair in (("n-2", "h-1"), ("n-1", "h-2")):
-            with self.subTest(pair=pair), self.assertRaises(sync.UidSelectionRequired):
-                asyncio.run(sync.validate_uid_pairs(Nanit(), API(), [pair]))
+            with self.subTest(pair=pair), self.assertRaises(errors.UidSelectionRequired):
+                asyncio.run(clients.validate_uid_pairs(Nanit(), API(), [pair]))
