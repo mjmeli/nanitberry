@@ -184,6 +184,30 @@ Use one running container with a given `./data` directory at a time. The saved t
 
 ## Development
 
+### Code layout
+
+- `sync.py`: Command-line entry point.
+- `clients.py`: Authentication, child selection, and Nanit calendar access.
+- `intervals.py`: Sleep normalization, classification, and time boundaries.
+- `ownership.py`: Durable ownership journal and reconciliation policy.
+- `huckleberry_sleep.py`: Huckleberry storage adapter and conditional writes.
+- `service.py`: Sync orchestration, locking, status, backfill, and scheduling.
+- `storage.py`: Atomic private JSON writes and health reports.
+- `config.py`: Environment settings and storage paths.
+- `errors.py`: Shared account setup errors.
+
+Service and client functions accept explicit `Settings` and `StoragePaths` objects for isolated runs. Defaults retain the environment configuration and `/data` paths used by Docker.
+
+### Tests
+
+Run the offline test suite:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+The suite uses synthetic network dependencies; CI also checks imports with the pinned real dependencies installed. Tests patch the module that owns the dependency being replaced.
+
 ### Images
 
 The Compose example uses the published image at `ghcr.io/mjmeli/nanitberry:latest`. Pull it with `docker compose pull`. For a local build, run:

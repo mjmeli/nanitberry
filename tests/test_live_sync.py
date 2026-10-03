@@ -7,12 +7,15 @@ from datetime import date, datetime
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync, SyntheticOwnership
+from tests.support import SyntheticOwnership
+import clients
+import service
+import huckleberry_sleep
 
 
 class LiveSyncTests(unittest.TestCase):
     def setUp(self):
-        self.ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        self.ownership_patch = patch.object(service, "SleepOwnership", SyntheticOwnership)
         self.ownership_patch.start()
         self.addCleanup(self.ownership_patch.stop)
         self.tz = ZoneInfo("America/New_York")
@@ -47,9 +50,9 @@ class LiveSyncTests(unittest.TestCase):
 
         api = types.SimpleNamespace(log_sleep=log_sleep)
         with patch.dict(os.environ, self.env), \
-             patch.object(sync, "calendar_sleep", calendar), \
-             patch.object(sync, "strict_sleep_intervals", history):
-            asyncio.run(sync._sync_day_with_clients(
+             patch.object(clients, "calendar_sleep", calendar), \
+             patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+            asyncio.run(service._sync_day_with_clients(
                 date(2026, 10, day), object(), api, [("baby", "child")], now=now))
 
     def test_night_imports_at_reported_end_without_duplicates(self):
@@ -150,13 +153,13 @@ class LiveSyncTests(unittest.TestCase):
                 raise StopScheduler
 
         with patch.dict(os.environ, self.env), \
-             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "datetime", wraps=datetime) as clock, \
-             patch.object(sync, "sync_day", run), \
-             patch.object(sync.asyncio, "sleep", wait):
+             patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(service, "datetime", wraps=datetime) as clock, \
+             patch.object(service, "sync_day", run), \
+             patch.object(service.asyncio, "sleep", wait):
             clock.now.return_value = self.at(2, 1, 35)
             with self.assertRaises(StopScheduler):
-                asyncio.run(sync.scheduled())
+                asyncio.run(service.scheduled())
         self.assertEqual([call.args[0] for call in run.await_args_list],
                          [date(2026, 10, 1), date(2026, 10, 2)] * 2)
 
@@ -170,14 +173,14 @@ class LiveSyncTests(unittest.TestCase):
 
         run = AsyncMock(side_effect=[RuntimeError("startup failed"), None, None])
         with patch.dict(os.environ, self.env), \
-             patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "datetime", wraps=datetime) as clock, \
-             patch.object(sync, "sync_day", run), \
-             patch.object(sync.asyncio, "sleep", AsyncMock(side_effect=[None, StopScheduler])), \
-             self.assertLogs(sync.LOG, level="ERROR") as captured:
+             patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(service, "datetime", wraps=datetime) as clock, \
+             patch.object(service, "sync_day", run), \
+             patch.object(service.asyncio, "sleep", AsyncMock(side_effect=[None, StopScheduler])), \
+             self.assertLogs(service.LOG, level="ERROR") as captured:
             clock.now.return_value = self.at(2, 1, 35)
             with self.assertRaises(StopScheduler):
-                asyncio.run(sync.scheduled())
+                asyncio.run(service.scheduled())
         self.assertEqual([call.args[0] for call in run.await_args_list],
                          [date(2026, 10, 1), date(2026, 10, 1), date(2026, 10, 2)])
         self.assertIn("will retry at the next scheduled check", captured.output[0])

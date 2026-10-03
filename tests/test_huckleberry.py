@@ -13,12 +13,18 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from tests.support import sync, SyntheticOwnership
+from tests.support import SyntheticOwnership
+import clients
+import config
+import intervals
+import service
+import storage
+import huckleberry_sleep
 
 
 class HuckleberryTests(unittest.TestCase):
     def setUp(self):
-        ownership_patch = patch.object(sync, "SleepOwnership", SyntheticOwnership)
+        ownership_patch = patch.object(service, "SleepOwnership", SyntheticOwnership)
         ownership_patch.start()
         self.addCleanup(ownership_patch.stop)
 
@@ -39,17 +45,17 @@ class HuckleberryTests(unittest.TestCase):
                 API.refreshes += 1
                 self.refresh_token = f"refresh-{API.refreshes + 1}"
 
-        original_state = sync.STATE
+        original_state = config.DEFAULT_PATHS.tokens
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                sync.STATE = Path(tmp) / "nanit_tokens.json"
-                asyncio.run(sync.authenticate_huckleberry(API()))
-                path = sync.huckleberry_token_path()
+                config.DEFAULT_PATHS.tokens = Path(tmp) / "nanit_tokens.json"
+                asyncio.run(clients.authenticate_huckleberry(API()))
+                path = storage.huckleberry_token_path()
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(json.loads(path.read_text())["refresh_token"], "refresh-1")
 
                 restarted = API()
-                asyncio.run(sync.authenticate_huckleberry(restarted))
+                asyncio.run(clients.authenticate_huckleberry(restarted))
                 self.assertEqual(API.password_logins, 1)
                 self.assertEqual(API.refreshes, 1)
                 self.assertEqual(json.loads(path.read_text())["refresh_token"], "refresh-2")
@@ -57,7 +63,7 @@ class HuckleberryTests(unittest.TestCase):
                 asyncio.run(restarted.refresh_session_token())
                 self.assertEqual(json.loads(path.read_text())["refresh_token"], "refresh-3")
         finally:
-            sync.STATE = original_state
+            config.DEFAULT_PATHS.tokens = original_state
 
     def test_failed_history_read_stops_sync(self):
         google = types.ModuleType("google")
@@ -89,7 +95,7 @@ class HuckleberryTests(unittest.TestCase):
                                       "google.cloud.firestore": firestore,
                                       "huckleberry_api.firebase_types": types_module}):
             with self.assertRaises(ConnectionError):
-                asyncio.run(sync.strict_sleep_intervals(API(), "child", start, start + timedelta(hours=1)))
+                asyncio.run(huckleberry_sleep.strict_sleep_intervals(API(), "child", start, start + timedelta(hours=1)))
 
     def test_history_includes_regular_and_batched_entries_crossing_window_start(self):
         firestore = types.ModuleType("google.cloud.firestore")
@@ -150,10 +156,10 @@ class HuckleberryTests(unittest.TestCase):
         with patch.dict(sys.modules, {"google": google, "google.cloud": cloud,
                                       "google.cloud.firestore": firestore,
                                       "huckleberry_api.firebase_types": models}):
-            found = asyncio.run(sync.strict_sleep_intervals(API(), "child", start, end))
+            found = asyncio.run(huckleberry_sleep.strict_sleep_intervals(API(), "child", start, end))
         self.assertEqual(sorted(entry.start for entry in found), [900, 950, 1900])
         self.assertEqual(filters, [("start", "<", 2000.0), ("multi", "==", True)])
-        self.assertTrue(any(sync.overlap(sync.existing_range(entry),
+        self.assertTrue(any(intervals.overlap(intervals.existing_range(entry),
                                          (start, datetime.fromtimestamp(1050, ZoneInfo("UTC"))))
                             for entry in found))
 
@@ -172,9 +178,9 @@ class HuckleberryTests(unittest.TestCase):
         output = StringIO()
         env = {"HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused"}
-        with patch.dict(os.environ, env), patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "HuckleberryAPI", API), redirect_stdout(output):
-            asyncio.run(sync.huckleberry_children())
+        with patch.dict(os.environ, env), patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(clients, "HuckleberryAPI", API), redirect_stdout(output):
+            asyncio.run(clients.huckleberry_children())
         self.assertEqual(output.getvalue(), "Example\tchild-123\n")
 
     def test_existing_manual_sleep_and_last_second_change_block_writes(self):
@@ -201,21 +207,21 @@ class HuckleberryTests(unittest.TestCase):
                "HUCKLEBERRY_EMAIL": "test@example.invalid",
                "HUCKLEBERRY_PASSWORD": "unused", "WRITE_ENABLED": "true",
                "USE_HUCKLEBERRY_HOURS": "false"}
-        with patch.dict(os.environ, env), patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "HuckleberryAPI", API), patch.object(sync, "restore_nanit", lambda _: object()), \
-             patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
-             patch.object(sync, "calendar_sleep", calendar), patch.object(sync, "strict_sleep_intervals", history):
-            asyncio.run(sync._sync_day(date(2020, 9, 27)))
+        with patch.dict(os.environ, env), patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(clients, "HuckleberryAPI", API), patch.object(clients, "restore_nanit", lambda _, **kwargs: object()), \
+             patch.object(clients, "validate_uid_pairs", new_callable=AsyncMock), \
+             patch.object(clients, "calendar_sleep", calendar), patch.object(huckleberry_sleep, "strict_sleep_intervals", history):
+            asyncio.run(service._sync_day(date(2020, 9, 27)))
         self.assertEqual(API.writes, [])
 
         async def changed_history(*_):
             changed_history.calls += 1
             return [] if changed_history.calls == 1 else [old]
         changed_history.calls = 0
-        with patch.dict(os.environ, env), patch.object(sync.aiohttp, "ClientSession", Session, create=True), \
-             patch.object(sync, "HuckleberryAPI", API), patch.object(sync, "restore_nanit", lambda _: object()), \
-             patch.object(sync, "validate_uid_pairs", new_callable=AsyncMock), \
-             patch.object(sync, "calendar_sleep", calendar), patch.object(sync, "strict_sleep_intervals", changed_history):
-            asyncio.run(sync._sync_day(date(2020, 9, 27)))
+        with patch.dict(os.environ, env), patch.object(service.aiohttp, "ClientSession", Session, create=True), \
+             patch.object(clients, "HuckleberryAPI", API), patch.object(clients, "restore_nanit", lambda _, **kwargs: object()), \
+             patch.object(clients, "validate_uid_pairs", new_callable=AsyncMock), \
+             patch.object(clients, "calendar_sleep", calendar), patch.object(huckleberry_sleep, "strict_sleep_intervals", changed_history):
+            asyncio.run(service._sync_day(date(2020, 9, 27)))
         self.assertEqual(changed_history.calls, 2)
         self.assertEqual(API.writes, [])

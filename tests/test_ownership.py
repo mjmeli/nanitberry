@@ -10,7 +10,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
-from tests.support import sync
+from tests import support
+import clients
+import errors
+import config
+import intervals
+import ownership
+import service
+import huckleberry_sleep
 
 
 class PreconditionFailed(Exception): pass
@@ -82,7 +89,7 @@ class OwnershipTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.state_patch = patch.object(sync, 'STATE', Path(self.tmp.name) / 'nanit_tokens.json')
+        self.state_patch = patch.object(config.DEFAULT_PATHS, 'tokens', Path(self.tmp.name) / 'nanit_tokens.json')
         self.state_patch.start()
         self.addCleanup(self.state_patch.stop)
         errors = types.ModuleType('google.api_core.exceptions')
@@ -108,12 +115,12 @@ class OwnershipTests(unittest.TestCase):
                 if path.startswith(self.root + '/intervals/'):
                     entry = types.SimpleNamespace(start=data['start'], duration=data['duration'],
                                                   document_id=path.split('/')[-1])
-                    if sync.overlap(sync.existing_range(entry), (start, end)): entries.append(entry)
+                    if intervals.overlap(intervals.existing_range(entry), (start, end)): entries.append(entry)
             return entries
-        self.history_patch = patch.object(sync, 'strict_sleep_intervals', history)
+        self.history_patch = patch.object(huckleberry_sleep, "strict_sleep_intervals", history)
         self.history_patch.start()
         self.addCleanup(self.history_patch.stop)
-        self.store = sync.SleepOwnership(self.now.timestamp())
+        self.store = ownership.SleepOwnership(self.now.timestamp())
 
     def apply(self, span=None, write=True):
         asyncio.run(self.store.sync_span(self.api, 'baby', 'child', span or self.span,
@@ -123,7 +130,7 @@ class OwnershipTests(unittest.TestCase):
         key = next(iter(self.store.data['records']))
         return key, self.root + '/intervals/' + key
     def reload(self, days=0):
-        self.store = sync.SleepOwnership((self.now + timedelta(days=days)).timestamp())
+        self.store = ownership.SleepOwnership((self.now + timedelta(days=days)).timestamp())
 
     def poll(self, entries, now, *, day=None, gap='20', daytime='false'):
         async def calendar(_, __, start, end):
@@ -132,8 +139,8 @@ class OwnershipTests(unittest.TestCase):
         env = {'TZ': 'UTC', 'USE_HUCKLEBERRY_HOURS': 'false', 'NIGHT_START': '20:00',
                'MORNING_CUTOFF': '07:00', 'WRITE_ENABLED': 'true',
                'MAX_WAKE_MINUTES': gap, 'SYNC_DAYTIME': daytime}
-        with patch.dict(os.environ, env), patch.object(sync, 'calendar_sleep', calendar):
-            asyncio.run(sync._sync_day_with_clients(day or (now - timedelta(days=1)).date(),
+        with patch.dict(os.environ, env), patch.object(clients, "calendar_sleep", calendar):
+            asyncio.run(service._sync_day_with_clients(day or (now - timedelta(days=1)).date(),
                                                    object(), self.api, [('baby', 'child')], now=now))
 
     def test_immediate_partial_import_then_short_wake_continuation_updates_one_row(self):
@@ -333,12 +340,12 @@ class OwnershipTests(unittest.TestCase):
         env = {'TZ': 'UTC', 'USE_HUCKLEBERRY_HOURS': 'false', 'NIGHT_START': '20:00',
                'MORNING_CUTOFF': '07:00', 'WRITE_ENABLED': 'true',
                'MAX_WAKE_MINUTES': '20', 'SYNC_DAYTIME': 'false'}
-        with patch.dict(os.environ, env), patch.object(sync, 'calendar_sleep', calendar):
+        with patch.dict(os.environ, env), patch.object(clients, "calendar_sleep", calendar):
             day = (self.now - timedelta(days=1)).date()
-            asyncio.run(sync._sync_day_with_clients(day, object(), self.api,
+            asyncio.run(service._sync_day_with_clients(day, object(), self.api,
                                                    [('baby', 'child')], now=self.now))
             entries[0]['end_ts'] = (self.start + timedelta(minutes=78)).timestamp()
-            asyncio.run(sync._sync_day_with_clients(day, object(), self.api,
+            asyncio.run(service._sync_day_with_clients(day, object(), self.api,
                                                    [('baby', 'child')], now=self.now))
         self.reload()
         key = next(iter(self.store.data['records']))
@@ -354,8 +361,8 @@ class OwnershipTests(unittest.TestCase):
         env = {'TZ': 'UTC', 'USE_HUCKLEBERRY_HOURS': 'false', 'NIGHT_START': '20:00',
                'MORNING_CUTOFF': '07:00', 'WRITE_ENABLED': 'true',
                'MAX_WAKE_MINUTES': '20', 'SYNC_DAYTIME': 'false'}
-        with patch.dict(os.environ, env), patch.object(sync, 'calendar_sleep', calendar):
-            asyncio.run(sync._sync_day_with_clients((self.now - timedelta(days=1)).date(),
+        with patch.dict(os.environ, env), patch.object(clients, "calendar_sleep", calendar):
+            asyncio.run(service._sync_day_with_clients((self.now - timedelta(days=1)).date(),
                                                    object(), self.api, [('baby', 'child')], now=self.now))
         self.reload()
         self.assertEqual(self.store.data['records'], {})

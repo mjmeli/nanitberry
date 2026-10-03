@@ -9,25 +9,28 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from tests.support import sync
+from tests import support
+import clients
+import config
+import storage
 
 
 class NanitTests(unittest.TestCase):
     def test_token_file_is_private_and_rotation_replaces_pair(self):
-        original_state = sync.STATE
+        original_state = config.DEFAULT_PATHS.tokens
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                sync.STATE = Path(tmp) / "nanit_tokens.json"
-                sync.save_tokens({"access_token": "first", "refresh_token": "old"})
-                sync.save_tokens({"access_token": "second", "refresh_token": "new"})
-                self.assertEqual(json.loads(sync.STATE.read_text()),
+                config.DEFAULT_PATHS.tokens = Path(tmp) / "nanit_tokens.json"
+                storage.save_tokens({"access_token": "first", "refresh_token": "old"})
+                storage.save_tokens({"access_token": "second", "refresh_token": "new"})
+                self.assertEqual(json.loads(config.DEFAULT_PATHS.tokens.read_text()),
                                  {"access_token": "second", "refresh_token": "new"})
-                self.assertEqual(os.stat(sync.STATE).st_mode & 0o777, 0o600)
+                self.assertEqual(os.stat(config.DEFAULT_PATHS.tokens).st_mode & 0o777, 0o600)
         finally:
-            sync.STATE = original_state
+            config.DEFAULT_PATHS.tokens = original_state
 
     def test_restored_client_persists_refreshed_tokens(self):
-        original_state, original_client = sync.STATE, sync.NanitClient
+        original_state, original_client = config.DEFAULT_PATHS.tokens, clients.NanitClient
         class Manager:
             def on_tokens_refreshed(self, callback):
                 self.callback = callback
@@ -38,16 +41,16 @@ class NanitTests(unittest.TestCase):
                 self.old_pair = (access, refresh)
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                sync.STATE = Path(tmp) / "nanit_tokens.json"
-                sync.NanitClient = Client
-                sync.save_tokens({"access_token": "old-access", "refresh_token": "old-refresh"})
-                client = sync.restore_nanit(object())
+                config.DEFAULT_PATHS.tokens = Path(tmp) / "nanit_tokens.json"
+                clients.NanitClient = Client
+                storage.save_tokens({"access_token": "old-access", "refresh_token": "old-refresh"})
+                client = clients.restore_nanit(object())
                 self.assertEqual(client.old_pair, ("old-access", "old-refresh"))
                 client.token_manager.callback("new-access", "new-refresh")
-                self.assertEqual(json.loads(sync.STATE.read_text()),
+                self.assertEqual(json.loads(config.DEFAULT_PATHS.tokens.read_text()),
                                  {"access_token": "new-access", "refresh_token": "new-refresh"})
         finally:
-            sync.STATE, sync.NanitClient = original_state, original_client
+            config.DEFAULT_PATHS.tokens, clients.NanitClient = original_state, original_client
 
     def test_calendar_uses_managed_token_and_retries_unauthorized(self):
         class Response:
@@ -72,7 +75,7 @@ class NanitTests(unittest.TestCase):
 
         client = types.SimpleNamespace(token_manager=Manager(), session=Session())
         start = datetime(2026, 9, 27, tzinfo=ZoneInfo("UTC"))
-        result = asyncio.run(sync.calendar_sleep(client, "baby", start, start + timedelta(hours=1)))
+        result = asyncio.run(clients.calendar_sleep(client, "baby", start, start + timedelta(hours=1)))
         self.assertEqual(result[0]["type"], "auto_sleep")
         self.assertEqual(client.token_manager.refreshed, 1)
         self.assertEqual(client.session.calls[1][1]["headers"]["Authorization"], "token second")
